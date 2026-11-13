@@ -1,5 +1,5 @@
-#ifndef NUMPYWRITE_H
-#define NUMPYWRITE_H
+#ifndef DATAIO_NUMPYWRITE_H_
+#define DATAIO_NUMPYWRITE_H_
 
 #include "../core/global.h"
 
@@ -16,20 +16,20 @@ struct NumpyBuffer {
   T* data;
   int64_t headerLen;
   int64_t dataLen;
-  vector<int64_t> shape;
-  string dtype;
-  int shapeStartByte;
+  std::vector<int64_t> shape;
+  std::string dtype;
+  size_t shapeStartByte;
 
   //Numpy specifies that this is must be a multiple of 64
   static const int TOTAL_HEADER_BYTES = 256;
 
-  NumpyBuffer(const vector<int64_t>& shp);
+  NumpyBuffer(const std::vector<int64_t>& shp);
   ~NumpyBuffer();
 
   NumpyBuffer(const NumpyBuffer&) = delete;
   NumpyBuffer& operator=(const NumpyBuffer&) = delete;
 
-  int64_t getActualDataLen(int64_t numWriteableRows);
+  int64_t getActualDataLen(int64_t numWriteableRows) const;
 
   //Writes the header of the buffer and returns the total size of the writeable portion of
   //the buffer, in bytes.
@@ -40,14 +40,14 @@ struct NumpyBuffer {
   uint64_t prepareHeaderWithNumRows(int64_t numWriteableRows);
 
 private:
-  NumpyBuffer(const vector<int64_t>& shp, const char* dt);
+  NumpyBuffer(const std::vector<int64_t>& shp, const char* dt);
 };
 
 //Simple class for writing zip-compressed data.
 //No current support for reading it.
 class ZipFile {
  public:
-  ZipFile(const string& fileName);
+  ZipFile(const std::string& fileName);
   ~ZipFile();
 
   ZipFile(const ZipFile&) = delete;
@@ -57,11 +57,8 @@ class ZipFile {
   void close();
 
   private:
-  string fileName;
+  std::string fileName;
   void* file;
 };
 
-
-
-
-#endif
+#endif  // DATAIO_NUMPYWRITE_H_

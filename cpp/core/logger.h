@@ -1,44 +1,67 @@
-#ifndef LOGGER_H
-#define LOGGER_H
+#ifndef CORE_LOGGER_H
+#define CORE_LOGGER_H
 
-#include <sstream>
 #include <fstream>
+#include <sstream>
+
 #include "../core/global.h"
 #include "../core/multithread.h"
 
 class LogBuf;
+class ConfigParser;
 
 class Logger {
  public:
-  Logger();
+  Logger(
+    ConfigParser* cfg = nullptr,
+    // The following are defaults that may be overriden by the user in the config.
+    bool logToStdoutDefault = false,
+    bool logToStderrDefault = false,
+    bool logTimeDefault = true,
+    //Log config contents on startup?
+    bool logConfigContents = true
+  );
   ~Logger();
 
   Logger(const Logger& other) = delete;
   Logger& operator=(const Logger& other) = delete;
 
-  void setLogToStdout(bool b);
-  void setLogToStderr(bool b);
-  void setLogTime(bool b);
-  void addOStream(ostream& out); //User responsible for cleaning up the ostream, logger does not take ownership
-  void addFile(const string& file);
+  bool isLoggingToStdout() const;
+  bool isLoggingToStderr() const;
 
-  //write and ostreams returned are synchronized with other calls to write and other ostream calls
-  //The lifetime of the Logger must exceed the lifetimes of any of the ostreams created from it.
-  //The caller is responsible for freeing the ostreams
-  void write(const string& str);
-  void writeNoEndline(const string& str);
-  ostream* createOStream();
+  void addOStream(std::ostream& out, bool afterCreation = true); // User responsible for cleaning up the ostream, logger does not take ownership
+  void addFile(const std::string& file, bool afterCreation = true);
+
+  void setDisabled(bool b);
+
+  // write and ostreams returned are synchronized with other calls to write and other ostream calls
+  // The lifetime of the Logger must exceed the lifetimes of any of the ostreams created from it.
+  // The caller is responsible for freeing the ostreams
+  void write(const std::string& str);
+  void writeNoEndline(const std::string& str);
+
+  static void logThreadUncaught(const std::string& name, Logger* logger, const std::function<void()>& f);
 
  private:
+  //------------
+  // Constant after initialization
   bool logToStdout;
   bool logToStderr;
   bool logTime;
-  vector<ostream*> ostreams;
-  vector<ofstream*> files;
-  vector<LogBuf*> logBufs;
+  std::string header;
+
+  //------------
+
+  std::vector<std::ostream*> ostreams;
+  std::vector<std::ofstream*> files;
+  std::vector<LogBuf*> logBufs;
   std::mutex mutex;
 
-  void write(const string& str, bool endLine);
+  bool isDisabled;
+
+  void write(const std::string& str, bool endLine);
+  void writeLocked(const std::string& str, bool endLine, std::ostream& out, const time_t& time);
+  std::ostream* createOStream();
 };
 
 class LogBuf final : public std::stringbuf {
@@ -54,4 +77,4 @@ class LogBuf final : public std::stringbuf {
   Logger* logger;
 };
 
-#endif
+#endif  // CORE_LOGGER_H_

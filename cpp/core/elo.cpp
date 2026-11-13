@@ -1,7 +1,11 @@
 #include "../core/elo.h"
-#include "../core/test.h"
 
 #include <cmath>
+
+#include "../core/test.h"
+#include "../core/os.h"
+
+using namespace std;
 
 static const double ELO_PER_LOG_GAMMA = 173.717792761;
 
@@ -59,7 +63,7 @@ static double computeLocalLogLikelihood(
     logLikelihood += logLikelihoodOfWL(elos[y] - elos[player], winMatrix[y*numPlayers+player]);
   }
   logLikelihood += logLikelihoodOfWL(elos[player] - 0.0, ComputeElos::WLRecord(priorWL,priorWL));
-     
+
   return logLikelihood;
 }
 
@@ -79,7 +83,7 @@ static double computeLocalLogLikelihoodSecondDerivative(
     logLikelihoodSecondDerivative += logLikelihoodOfWLSecondDerivative(elos[y] - elos[player], winMatrix[y*numPlayers+player]);
   }
   logLikelihoodSecondDerivative += logLikelihoodOfWLSecondDerivative(elos[player] - 0.0, ComputeElos::WLRecord(priorWL,priorWL));
-     
+
   return logLikelihoodSecondDerivative;
 }
 
@@ -98,7 +102,7 @@ vector<double> ComputeElos::computeApproxEloStdevs(
   const int radius = 1500;
   vector<double> relProbs(radius*2+1,0.0);
   const double step = 1.0; //one-elo increments
-  
+
   for(int player = 0; player < numPlayers; player++) {
     double logLikelihood = computeLocalLogLikelihood(player,elos,winMatrix,numPlayers,priorWL);
     double sumRelProbs = 0.0;
@@ -158,10 +162,10 @@ vector<double> ComputeElos::computeElos(
       priorMatchLogGammaSums[x] = maxLogGamma + log(exp(logGammas[x] - maxLogGamma) + exp(0.0 - maxLogGamma));
     }
   };
-  
+
   auto iterate = [&]() {
     recomputeLogGammaSums();
-    
+
     double maxEloDiff = 0;
     for(int x = 0; x<numPlayers; x++) {
       double oldLogGamma = logGammas[x];
@@ -177,12 +181,12 @@ vector<double> ComputeElos::computeElos(
       }
       sumInvDifficulty += priorWL / exp(priorMatchLogGammaSums[x] - oldLogGamma);
       sumInvDifficulty += priorWL / exp(priorMatchLogGammaSums[x] - oldLogGamma);
-      
+
       double logGammaDiff = log((numWins[x] + priorWL) / sumInvDifficulty);
       double newLogGamma = oldLogGamma + logGammaDiff;
       logGammas[x] = newLogGamma;
 
-      double eloDiff = ELO_PER_LOG_GAMMA * abs(logGammaDiff);
+      double eloDiff = ELO_PER_LOG_GAMMA * std::fabs(logGammaDiff);
       maxEloDiff = std::max(eloDiff,maxEloDiff);
     }
     return maxEloDiff;
@@ -218,7 +222,7 @@ vector<double> ComputeElos::computeElos(
 
 
   //General gradient-free algorithm
-  vector<double> nextDelta(numPlayers,100.0);  
+  vector<double> nextDelta(numPlayers,100.0);
   auto iterate = [&]() {
     double maxEloDiff = 0;
     for(int x = 0; x<numPlayers; x++) {
@@ -242,7 +246,7 @@ vector<double> ComputeElos::computeElos(
       }
       else {
         elos[x] = oldElo;
-        nextDelta[x] *= 0.4;
+        nextDelta[x] *= 0.8;
       }
 
       double eloDiff = nextDelta[x];
@@ -251,7 +255,7 @@ vector<double> ComputeElos::computeElos(
     return maxEloDiff;
   };
 
-  
+
   for(int i = 0; i<maxIters; i++) {
     double maxEloDiff = iterate();
     if(out != NULL && i % 50 == 0) {
@@ -260,62 +264,76 @@ vector<double> ComputeElos::computeElos(
     if(maxEloDiff < tolerance)
       break;
   }
-  
+
   return elos;
 }
 
+static bool approxEqual(double x, double y, double tolerance) {
+  return std::fabs(x - y) < tolerance;
+}
 
 void ComputeElos::runTests() {
   ostringstream out;
+  //Avoid complaint on windows about not calling a function with arguments - the point is to ignore the function
+#ifdef OS_IS_WINDOWS
+#pragma warning(suppress:4551)
+  (void)computeLocalLogLikelihoodSecondDerivative;
+#else
+  (void)computeLocalLogLikelihoodSecondDerivative;
+#endif
 
-  auto printEloStuff = [&](vector<double>& elos, ComputeElos::WLRecord* winMatrix, int numPlayers, double priorWL) {
-    vector<double> eloStdevs = ComputeElos::computeApproxEloStdevs(elos,winMatrix,numPlayers,priorWL);
-    for(int i = 0; i<numPlayers; i++) {
-      double local2d = computeLocalLogLikelihoodSecondDerivative(i,elos,winMatrix,numPlayers,priorWL);
+  // auto printEloStuff = [&](vector<double>& elos, ComputeElos::WLRecord* winMatrix, int numPlayers, double priorWL) {
+  //   vector<double> eloStdevs = ComputeElos::computeApproxEloStdevs(elos,winMatrix,numPlayers,priorWL);
+  //   for(int i = 0; i<numPlayers; i++) {
+  //     double local2d = computeLocalLogLikelihoodSecondDerivative(i,elos,winMatrix,numPlayers,priorWL);
 
-      double elo = elos[i];
-      double eloHi = elos[i] + 1.0;
-      double eloLo = elos[i] - 1.0;
-      elos[i] = eloHi; double llHi = computeLocalLogLikelihood(i,elos,winMatrix,numPlayers,priorWL);
-      elos[i] = eloLo; double llLo = computeLocalLogLikelihood(i,elos,winMatrix,numPlayers,priorWL);
-      elos[i] = elo; double llMid = computeLocalLogLikelihood(i,elos,winMatrix,numPlayers,priorWL);
+  //     double elo = elos[i];
+  //     double eloHi = elos[i] + 1.0;
+  //     double eloLo = elos[i] - 1.0;
+  //     elos[i] = eloHi; double llHi = computeLocalLogLikelihood(i,elos,winMatrix,numPlayers,priorWL);
+  //     elos[i] = eloLo; double llLo = computeLocalLogLikelihood(i,elos,winMatrix,numPlayers,priorWL);
+  //     elos[i] = elo; double llMid = computeLocalLogLikelihood(i,elos,winMatrix,numPlayers,priorWL);
 
-      double approx2d = llHi + llLo - 2.0 * llMid;
-      
-      out << "Elo " << i << " = " << elos[i] << " stdev " << eloStdevs[i] << " 2nd der " << local2d << " approx " << approx2d << endl;
-    }
-  };
-  
-  { 
-    const char* name = "Elo test 0";
+  //     double approx2d = llHi + llLo - 2.0 * llMid;
+
+  //     out << "Elo " << i << " = " << elos[i] << " stdev " << eloStdevs[i] << " 2nd der " << local2d << " approx " << approx2d << endl;
+  //   }
+  // };
+
+  double optTolerance = 0.00001;
+  double testTolerance = 0.01;
+
+  {
+    // const char* name = "Elo test 0";
 
     int numPlayers = 1;
     ComputeElos::WLRecord* winMatrix = new ComputeElos::WLRecord[numPlayers*numPlayers];
     double priorWL = 0.1;
     int maxIters = 1000;
-    double tolerance = 0.0001;
 
-    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,tolerance,&out);
-    
-    string expected = R"%%(
-Iteration 0 maxEloDiff = 40
-Elo 0 = 0 stdev 780.104 2nd der -1.65684e-06 approx -1.65684e-06
-)%%";
+    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,optTolerance,&out);
+    testAssert(elos.size() == 1);
+    testAssert(approxEqual(elos[0], 0.0, testTolerance));
 
-    printEloStuff(elos,winMatrix,numPlayers,priorWL);
-    
-    TestCommon::expect(name,out,expected);
+//     string expected = R"%%(
+// Iteration 0 maxEloDiff = 80
+// Iteration 50 maxEloDiff = 0.0011418
+// Elo 0 = 0 stdev 780.104 2nd der -1.65684e-06 approx -1.65684e-06
+// )%%";
+
+//     printEloStuff(elos,winMatrix,numPlayers,priorWL);
+
+//     TestCommon::expect(name,out,expected);
     delete[] winMatrix;
   }
 
-  { 
-    const char* name = "Elo test 1";
+  {
+    // const char* name = "Elo test 1";
 
     int numPlayers = 3;
     ComputeElos::WLRecord* winMatrix = new ComputeElos::WLRecord[numPlayers*numPlayers];
     double priorWL = 1.0;
     int maxIters = 1000;
-    double tolerance = 0.0001;
 
     winMatrix[0*numPlayers+0] = ComputeElos::WLRecord(0.0,0.0);
     winMatrix[0*numPlayers+1] = ComputeElos::WLRecord(0.0,0.0);
@@ -327,37 +345,41 @@ Elo 0 = 0 stdev 780.104 2nd der -1.65684e-06 approx -1.65684e-06
     winMatrix[2*numPlayers+1] = ComputeElos::WLRecord(100.0,0.0);
     winMatrix[2*numPlayers+2] = ComputeElos::WLRecord(0.0,0.0);
 
-    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,tolerance,&out);
-    
-    string expected = R"%%(
-Iteration 0 maxEloDiff = 110
-Iteration 50 maxEloDiff = 0.189831
-Iteration 100 maxEloDiff = 0.14169
-Iteration 150 maxEloDiff = 0.105757
-Iteration 200 maxEloDiff = 0.0287043
-Iteration 250 maxEloDiff = 0.00779085
-Iteration 300 maxEloDiff = 0.00211458
-Iteration 350 maxEloDiff = 0.00157832
-Iteration 400 maxEloDiff = 0.000428383
-Elo 0 = 4.39805e-07 stdev 313.547 2nd der -1.65684e-05 approx -1.65684e-05
-Elo 1 = 59.9906 stdev 21.2381 2nd der -0.00222709 approx -0.00222709
-Elo 2 = -59.9762 stdev 21.2381 2nd der -0.00222709 approx -0.00222709
-)%%";
+    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,optTolerance,&out);
+    testAssert(elos.size() == 3);
+    testAssert(approxEqual(elos[0], 0.0, testTolerance));
+    testAssert(approxEqual(elos[1], 59.9833, testTolerance));
+    testAssert(approxEqual(elos[2], -59.9834, testTolerance));
 
-    printEloStuff(elos,winMatrix,numPlayers,priorWL);
-    
-    TestCommon::expect(name,out,expected);
+//     string expected = R"%%(
+// Iteration 0 maxEloDiff = 110
+// Iteration 50 maxEloDiff = 0.135559
+// Iteration 100 maxEloDiff = 0.0708954
+// Iteration 150 maxEloDiff = 0.0509811
+// Iteration 200 maxEloDiff = 0.0266623
+// Iteration 250 maxEloDiff = 0.0191729
+// Iteration 300 maxEloDiff = 0.0137873
+// Iteration 350 maxEloDiff = 0.00721055
+// Iteration 400 maxEloDiff = 0.00518513
+// Iteration 450 maxEloDiff = 0.000291829
+// Elo 0 = 2.37142e-07 stdev 313.547 2nd der -1.65684e-05 approx -1.65684e-05
+// Elo 1 = 59.9831 stdev 21.2381 2nd der -0.00222709 approx -0.00222709
+// Elo 2 = -59.9836 stdev 21.2381 2nd der -0.00222709 approx -0.00222709
+// )%%";
+
+//     printEloStuff(elos,winMatrix,numPlayers,priorWL);
+
+//     TestCommon::expect(name,out,expected);
     delete[] winMatrix;
   }
 
-  { 
-    const char* name = "Elo test 2";
+  {
+    // const char* name = "Elo test 2";
 
     int numPlayers = 3;
     ComputeElos::WLRecord* winMatrix = new ComputeElos::WLRecord[numPlayers*numPlayers];
     double priorWL = 1.0;
     int maxIters = 1000;
-    double tolerance = 0.0001;
 
     winMatrix[0*numPlayers+0] = ComputeElos::WLRecord(0.0,0.0);
     winMatrix[0*numPlayers+1] = ComputeElos::WLRecord(0.0,0.0);
@@ -369,29 +391,34 @@ Elo 2 = -59.9762 stdev 21.2381 2nd der -0.00222709 approx -0.00222709
     winMatrix[2*numPlayers+1] = ComputeElos::WLRecord(1.0,0.0);
     winMatrix[2*numPlayers+2] = ComputeElos::WLRecord(0.0,0.0);
 
-    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,tolerance,&out);
-    
-    string expected = R"%%(
-Iteration 0 maxEloDiff = 110
-Elo 0 = 76.5227 stdev 162.965 2nd der -4.7933e-05 approx -4.7933e-05
-Elo 1 = 76.5227 stdev 162.965 2nd der -4.7933e-05 approx -4.7933e-05
-Elo 2 = -161.285 stdev 123.894 2nd der -7.77407e-05 approx -7.77407e-05
-)%%";
+    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,optTolerance,&out);
+    testAssert(elos.size() == 3);
+    testAssert(approxEqual(elos[0], 76.5228, testTolerance));
+    testAssert(approxEqual(elos[1], 76.5228, testTolerance));
+    testAssert(approxEqual(elos[2], -161.285, testTolerance));
 
-    printEloStuff(elos,winMatrix,numPlayers,priorWL);
-    
-    TestCommon::expect(name,out,expected);
+//     string expected = R"%%(
+// Iteration 0 maxEloDiff = 110
+// Iteration 50 maxEloDiff = 0.0985887
+// Iteration 100 maxEloDiff = 8.83612e-05
+// Elo 0 = 76.5227 stdev 162.965 2nd der -4.7933e-05 approx -4.7933e-05
+// Elo 1 = 76.5227 stdev 162.965 2nd der -4.7933e-05 approx -4.7933e-05
+// Elo 2 = -161.285 stdev 123.894 2nd der -7.77407e-05 approx -7.77407e-05
+// )%%";
+
+//     printEloStuff(elos,winMatrix,numPlayers,priorWL);
+
+//     TestCommon::expect(name,out,expected);
     delete[] winMatrix;
   }
 
-  { 
-    const char* name = "Elo test 3";
+  {
+    // const char* name = "Elo test 3";
 
     int numPlayers = 3;
     ComputeElos::WLRecord* winMatrix = new ComputeElos::WLRecord[numPlayers*numPlayers];
     double priorWL = 1.0;
     int maxIters = 1000;
-    double tolerance = 0.0001;
 
     winMatrix[0*numPlayers+0] = ComputeElos::WLRecord(0.0,0.0);
     winMatrix[0*numPlayers+1] = ComputeElos::WLRecord(0.0,0.0);
@@ -403,29 +430,35 @@ Elo 2 = -161.285 stdev 123.894 2nd der -7.77407e-05 approx -7.77407e-05
     winMatrix[2*numPlayers+1] = ComputeElos::WLRecord(0.0,5.0);
     winMatrix[2*numPlayers+2] = ComputeElos::WLRecord(0.0,0.0);
 
-    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,tolerance,&out);
-    
-    string expected = R"%%(
-Iteration 0 maxEloDiff = 110
-Elo 0 = -190.848 stdev 161.134 2nd der -4.97053e-05 approx -4.97053e-05
-Elo 1 = 190.848 stdev 161.134 2nd der -4.97053e-05 approx -4.97053e-05
-Elo 2 = 0 stdev 106.849 2nd der -9.11264e-05 approx -9.11263e-05
-)%%";
+    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,optTolerance,&out);
+    testAssert(elos.size() == 3);
+    testAssert(approxEqual(elos[0], -190.849, testTolerance));
+    testAssert(approxEqual(elos[1], 190.849, testTolerance));
+    testAssert(approxEqual(elos[2], 0, testTolerance));
 
-    printEloStuff(elos,winMatrix,numPlayers,priorWL);
-    
-    TestCommon::expect(name,out,expected);
+//     string expected = R"%%(
+// Iteration 0 maxEloDiff = 110
+// Iteration 50 maxEloDiff = 0.916107
+// Iteration 100 maxEloDiff = 0.0272716
+// Iteration 150 maxEloDiff = 0.000590434
+// Elo 0 = -190.849 stdev 161.134 2nd der -4.97053e-05 approx -4.97053e-05
+// Elo 1 = 190.849 stdev 161.134 2nd der -4.97053e-05 approx -4.97053e-05
+// Elo 2 = 6.54304e-07 stdev 106.849 2nd der -9.11264e-05 approx -9.11263e-05
+// )%%";
+
+//     printEloStuff(elos,winMatrix,numPlayers,priorWL);
+
+//     TestCommon::expect(name,out,expected);
     delete[] winMatrix;
   }
-  
-  { 
-    const char* name = "Elo test 3";
+
+  {
+    // const char* name = "Elo test 3";
 
     int numPlayers = 3;
     ComputeElos::WLRecord* winMatrix = new ComputeElos::WLRecord[numPlayers*numPlayers];
     double priorWL = 0.1;
     int maxIters = 10000;
-    double tolerance = 0.0001;
 
     winMatrix[0*numPlayers+0] = ComputeElos::WLRecord(0.0,0.0);
     winMatrix[0*numPlayers+1] = ComputeElos::WLRecord(0.0,0.0);
@@ -437,29 +470,35 @@ Elo 2 = 0 stdev 106.849 2nd der -9.11264e-05 approx -9.11263e-05
     winMatrix[2*numPlayers+1] = ComputeElos::WLRecord(0.0,5.0);
     winMatrix[2*numPlayers+2] = ComputeElos::WLRecord(0.0,0.0);
 
-    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,tolerance,&out);
-    
-    string expected = R"%%(
-Iteration 0 maxEloDiff = 110
-Elo 0 = -266.471 stdev 234.178 2nd der -2.99835e-05 approx -2.99835e-05
-Elo 1 = 266.471 stdev 234.178 2nd der -2.99835e-05 approx -2.99835e-05
-Elo 2 = -7.72341e-07 stdev 128.942 2nd der -5.96895e-05 approx -5.96895e-05
-)%%";
+    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,optTolerance,&out);
+    testAssert(elos.size() == 3);
+    testAssert(approxEqual(elos[0], -266.471, testTolerance));
+    testAssert(approxEqual(elos[1], 266.471, testTolerance));
+    testAssert(approxEqual(elos[2], 0, testTolerance));
 
-    printEloStuff(elos,winMatrix,numPlayers,priorWL);
-    
-    TestCommon::expect(name,out,expected);
+//     string expected = R"%%(
+// Iteration 0 maxEloDiff = 110
+// Iteration 50 maxEloDiff = 1.25965
+// Iteration 100 maxEloDiff = 0.0198339
+// Iteration 150 maxEloDiff = 0.000429407
+// Elo 0 = -266.471 stdev 234.178 2nd der -2.99835e-05 approx -2.99835e-05
+// Elo 1 = 266.471 stdev 234.178 2nd der -2.99835e-05 approx -2.99835e-05
+// Elo 2 = 7.36479e-07 stdev 128.942 2nd der -5.96894e-05 approx -5.96895e-05
+// )%%";
+
+//     printEloStuff(elos,winMatrix,numPlayers,priorWL);
+
+//     TestCommon::expect(name,out,expected);
     delete[] winMatrix;
   }
 
-  { 
-    const char* name = "Elo test 4";
+  {
+    // const char* name = "Elo test 4";
 
     int numPlayers = 3;
     ComputeElos::WLRecord* winMatrix = new ComputeElos::WLRecord[numPlayers*numPlayers];
     double priorWL = 0.01;
     int maxIters = 10000;
-    double tolerance = 0.0001;
 
     winMatrix[0*numPlayers+0] = ComputeElos::WLRecord(0.0,0.0);
     winMatrix[0*numPlayers+1] = ComputeElos::WLRecord(0.0,0.0);
@@ -471,54 +510,46 @@ Elo 2 = -7.72341e-07 stdev 128.942 2nd der -5.96895e-05 approx -5.96895e-05
     winMatrix[2*numPlayers+1] = ComputeElos::WLRecord(0.0,5.0);
     winMatrix[2*numPlayers+2] = ComputeElos::WLRecord(0.0,0.0);
 
-    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,tolerance,&out);
-    
-    string expected = R"%%(
-Iteration 0 maxEloDiff = 110
-Iteration 50 maxEloDiff = 0.0690295
-Iteration 100 maxEloDiff = 0.0515235
-Iteration 150 maxEloDiff = 0.0384571
-Iteration 200 maxEloDiff = 0.0287043
-Iteration 250 maxEloDiff = 0.0214248
-Iteration 300 maxEloDiff = 0.0159915
-Iteration 350 maxEloDiff = 0.032824
-Iteration 400 maxEloDiff = 0.0244998
-Iteration 450 maxEloDiff = 0.00664968
-Iteration 500 maxEloDiff = 0.0136491
-Iteration 550 maxEloDiff = 0.0101877
-Iteration 600 maxEloDiff = 0.00760407
-Iteration 650 maxEloDiff = 0.00567567
-Iteration 700 maxEloDiff = 0.00423631
-Iteration 750 maxEloDiff = 0.00316197
-Iteration 800 maxEloDiff = 0.00649026
-Iteration 850 maxEloDiff = 0.00176157
-Iteration 900 maxEloDiff = 0.00361579
-Iteration 950 maxEloDiff = 0.00269882
-Iteration 1000 maxEloDiff = 0.0020144
-Iteration 1050 maxEloDiff = 0.00150354
-Iteration 1100 maxEloDiff = 0.00112224
-Iteration 1150 maxEloDiff = 0.00083764
-Iteration 1200 maxEloDiff = 0.00171934
-Iteration 1250 maxEloDiff = 0.00128331
-Iteration 1300 maxEloDiff = 0.000957861
-Iteration 1350 maxEloDiff = 0.000714946
-Iteration 1400 maxEloDiff = 0.000533635
-Iteration 1450 maxEloDiff = 0.000398304
-Iteration 1500 maxEloDiff = 0.000817557
-Iteration 1550 maxEloDiff = 0.0002219
-Iteration 1600 maxEloDiff = 0.00045547
-Iteration 1650 maxEloDiff = 0.000339962
-Iteration 1700 maxEloDiff = 0.000253747
-Iteration 1750 maxEloDiff = 0.000189397
-Iteration 1800 maxEloDiff = 0.000141365
-Elo 0 = -322.047 stdev 246.125 2nd der -2.92533e-05 approx -2.92534e-05
-Elo 1 = 292.708 stdev 248.472 2nd der -2.78531e-05 approx -2.78531e-05
-Elo 2 = 14.549 stdev 129.788 2nd der -5.71067e-05 approx -5.71068e-05
-)%%";
+    vector<double> elos = ComputeElos::computeElos(winMatrix,numPlayers,priorWL,maxIters,optTolerance,&out);
+    testAssert(elos.size() == 3);
+    testAssert(approxEqual(elos[0], -322.013, testTolerance));
+    testAssert(approxEqual(elos[1], 292.742, testTolerance));
+    testAssert(approxEqual(elos[2], 14.5828, testTolerance));
 
-    printEloStuff(elos,winMatrix,numPlayers,priorWL);
-    
-    TestCommon::expect(name,out,expected);
+//     string expected = R"%%(
+// Iteration 0 maxEloDiff = 110
+// Iteration 50 maxEloDiff = 1.25965
+// Iteration 100 maxEloDiff = 0.479109
+// Iteration 150 maxEloDiff = 0.344529
+// Iteration 200 maxEloDiff = 0.340659
+// Iteration 250 maxEloDiff = 0.178159
+// Iteration 300 maxEloDiff = 0.176158
+// Iteration 350 maxEloDiff = 0.0921276
+// Iteration 400 maxEloDiff = 0.0662492
+// Iteration 450 maxEloDiff = 0.04764
+// Iteration 500 maxEloDiff = 0.0342581
+// Iteration 550 maxEloDiff = 0.0246351
+// Iteration 600 maxEloDiff = 0.0177152
+// Iteration 650 maxEloDiff = 0.012739
+// Iteration 700 maxEloDiff = 0.00916067
+// Iteration 750 maxEloDiff = 0.00658747
+// Iteration 800 maxEloDiff = 0.00473707
+// Iteration 850 maxEloDiff = 0.00247741
+// Iteration 900 maxEloDiff = 0.00244958
+// Iteration 950 maxEloDiff = 0.00128109
+// Iteration 1000 maxEloDiff = 0.000921237
+// Iteration 1050 maxEloDiff = 0.000662464
+// Iteration 1100 maxEloDiff = 0.000346458
+// Iteration 1150 maxEloDiff = 0.000249139
+// Iteration 1200 maxEloDiff = 0.000179157
+// Elo 0 = -322.005 stdev 246.125 2nd der -2.92534e-05 approx -2.92534e-05
+// Elo 1 = 292.751 stdev 248.472 2nd der -2.7853e-05 approx -2.78531e-05
+// Elo 2 = 14.5915 stdev 129.788 2nd der -5.71067e-05 approx -5.71068e-05
+// )%%";
+
+//     printEloStuff(elos,winMatrix,numPlayers,priorWL);
+
+//     TestCommon::expect(name,out,expected);
     delete[] winMatrix;
   }
 

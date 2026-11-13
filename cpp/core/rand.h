@@ -7,21 +7,27 @@
  * instances created simultaneously in different threads or on different machines should all be distinct.
  * Note: Signed integer functions might not be portable to other architectures.
  *
+ * On a single core basic cloud machine, roughly generates about 500 million uint32_t/second and
+ * can be initialized roughly 100k/second, and 250k/second for fixed seed.
+ *
+ *
  * Combines:
  * PCG32 (period 2^64)
  * XorShift1024Mult (period 2^1024-1)
  */
 
-#ifndef RAND_H
-#define RAND_H
+#ifndef CORE_RAND_H_
+#define CORE_RAND_H_
 
 #include <cassert>
 #include <cmath>
-#include <stdint.h>
 #include <iostream>
-#include "../core/rand_helpers.h"
+#include <vector>
+#include <stdint.h>
 
-using namespace std;
+#include "../core/global.h"
+#include "../core/rand_helpers.h"
+#include "../core/test.h"
 
 class Rand
 {
@@ -32,7 +38,7 @@ class Rand
   bool hasGaussian;
   double storedGaussian;
 
-  string initSeed;
+  std::string initSeed;
   uint64_t numCalls;
 
  public:
@@ -42,14 +48,14 @@ class Rand
   Rand();
   //Intializes according to the provided seed
   Rand(const char* seed);
-  Rand(const string& seed);
+  Rand(const std::string& seed);
   Rand(uint64_t seed);
 
   //Reinitialize according to system time and some other unique junk
   void init();
   //Reinitialize according to the provided seed
   void init(const char* seed);
-  void init(const string& seed);
+  void init(const std::string& seed);
   void init(uint64_t seed);
 
   ~Rand();
@@ -60,7 +66,7 @@ class Rand
   public:
 
   //MISC-------------------------------------------------
-  string getSeed() const;
+  std::string getSeed() const;
   uint64_t getNumCalls() const;
 
   //UNSIGNED INTEGER-------------------------------------
@@ -73,6 +79,8 @@ class Rand
   uint32_t nextUInt(const int* freq, size_t n);
   //Returns a random integer according to the given unnormalized probability distribution
   uint32_t nextUInt(const double* relProbs, size_t n);
+  //Returns a random integer according to the given unnormalized cumulative probability distribution
+  size_t nextIndexCumulative(const double* cumRelProbs, size_t n);
 
   //SIGNED INTEGER---------------------------------------
 
@@ -103,6 +111,9 @@ class Rand
 
   //Returns a normally distributed double with mean 0 stdev 1
   double nextGaussian();
+  //Truncated refers to the probability distribution, not the sample
+  //So on falling outside the range, we redraw, rather than capping.
+  double nextGaussianTruncated(double bound);
   //Returns an exponentially distributed double with mean 1.
   double nextExponential();
   //Returns a logistically distributed double with mean 0 and scale 1 (cdf = 1/(1+exp(-x)))
@@ -110,11 +121,23 @@ class Rand
   //Returns a gamma distributed double with shape a and scale 1
   double nextGamma(double a);
 
+  //OTHER------------------------------------------------
+  // Fills buf[0] through buf[n-1] with a random permutation of the integers from 0 to n-1 inclusive.
+  void fillShuffledUIntRange(size_t n, uint32_t* buf);
+
+  template<typename T>
+  void shuffle(std::vector<T>& vec) {
+    for(size_t i = 1; i<vec.size(); i++) {
+      size_t r = (size_t)nextUInt64(i+1);
+      std::swap(vec[i],vec[r]);
+    }
+  }
+
   //TESTING----------------------------------------------
   static void runTests();
 };
 
-inline string Rand::getSeed() const
+inline std::string Rand::getSeed() const
 {
   return initSeed;
 }
@@ -157,7 +180,9 @@ inline int32_t Rand::nextInt(int32_t a, int32_t b)
 
 inline uint64_t Rand::nextUInt64()
 {
-  return ((uint64_t)nextUInt()) | ((uint64_t)nextUInt() << 32);
+  uint64_t lower = (uint64_t)nextUInt();
+  uint64_t upper = (uint64_t)nextUInt() << 32;
+  return lower | upper;
 }
 
 inline uint64_t Rand::nextUInt64(uint64_t n)
@@ -191,7 +216,7 @@ inline uint32_t Rand::nextUInt(const int* freq, size_t n)
     {return i;}
   }
   //Should not get to here
-  assert(false);
+  ASSERT_UNREACHABLE;
   return 0;
 }
 
@@ -199,12 +224,14 @@ inline uint32_t Rand::nextUInt(const double* relProbs, size_t n)
 {
   assert(n > 0);
   assert(n < 0xFFFFFFFF);
-  double_t sum = 0;
+  double sum = 0;
   for(uint32_t i = 0; i<n; i++)
   {
     assert(relProbs[i] >= 0);
     sum += relProbs[i];
   }
+  testAssert(std::isfinite(sum));
+  testAssert(sum > 0);
 
   double d = nextDouble(sum);
   sum = 0.0;
@@ -214,7 +241,17 @@ inline uint32_t Rand::nextUInt(const double* relProbs, size_t n)
     if(sum > d)
       return i;
   }
-  return (uint32_t)(n-1);
+
+  //Reachable if nextDouble returned exactly sum.
+  //Under IEEE round-to-nearest this only happens when sum is subnormal or is the smallest normal double,
+  //since nextDouble() is at most 1 - 2^-53 and for larger sums the product rounds to less than sum.
+  //Pick the last index with positive weight, rather than the last index, which might have zero weight.
+  for(uint32_t i = (uint32_t)(n-1); i > 0; i--)
+  {
+    if(relProbs[i] > 0)
+      return i;
+  }
+  return 0;
 }
 
 
@@ -273,18 +310,32 @@ inline double Rand::nextGaussian()
   }
 }
 
+inline double Rand::nextGaussianTruncated(double bound)
+{
+  assert(bound >= 0.1);
+  double d = nextGaussian();
+  while(d < -bound || d > bound)
+    d = nextGaussian();
+  return d;
+}
+
 inline double Rand::nextExponential()
 {
   double r = 0.0;
-  while(r <= 1e-16)
+  while(r <= 1e-17)
     r = nextDouble();
   return -log(r);
 }
 
 inline double Rand::nextLogistic()
 {
-  double x = nextDouble();
-  return log(x / (1.0 - x));
+  double num = 0.0;
+  double denom = 0.0;
+  while(num <= 0.0 || denom <= 0.0) {
+    num = nextDouble();
+    denom = 1.0 - num;
+  }
+  return log(num / denom);
 }
 
-#endif
+#endif  // CORE_RAND_H_

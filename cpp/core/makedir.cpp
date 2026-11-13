@@ -1,38 +1,44 @@
 #include "../core/makedir.h"
+#include "../core/os.h"
 
-#ifdef _WIN32
- #define _IS_WINDOWS
-#elif _WIN64
- #define _IS_WINDOWS
-#elif __unix || __APPLE__
-  #define _IS_UNIX
-#else
- #error Unknown OS!
-#endif
-
-#ifdef _IS_WINDOWS
+#ifdef OS_IS_WINDOWS
   #include <windows.h>
 #endif
-#ifdef _IS_UNIX
+#ifdef OS_IS_UNIX_OR_APPLE
   #include <sys/types.h>
   #include <sys/stat.h>
 #endif
 
 #include <cerrno>
+#include <ghc/filesystem.hpp>
+
+namespace gfs = ghc::filesystem;
+
+//------------------------
+#include "../core/using.h"
+//------------------------
 
 //WINDOWS IMPLMENTATIION-------------------------------------------------------------
 
-#ifdef _IS_WINDOWS
+#ifdef OS_IS_WINDOWS
 
 void MakeDir::make(const string& path) {
-  CreateDirectory(path.c_str(),NULL);
+  gfs::path gfsPath(gfs::u8path(path));
+  std::error_code ec;
+  bool suc = gfs::create_directory(gfsPath, ec);
+  if(!suc && ec) {
+    if(ec == std::errc::file_exists)
+      return;
+    throw StringError("Error creating directory: " + ec.message());
+  }
+  //CreateDirectory(path.c_str(),NULL);
 }
 
 #endif
 
 //UNIX IMPLEMENTATION------------------------------------------------------------------
 
-#ifdef _IS_UNIX
+#ifdef OS_IS_UNIX_OR_APPLE
 
 void MakeDir::make(const string& path) {
   int result = mkdir(path.c_str(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);

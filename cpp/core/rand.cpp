@@ -1,31 +1,28 @@
+#include "../core/rand.h"
+#include "../core/os.h"
 
-#ifdef _WIN32
- #define _RAND_IS_WINDOWS
-#elif _WIN64
- #define _RAND_IS_WINDOWS
-#elif __unix || __APPLE__
-  #define _RAND_IS_UNIX
-#else
- #error Unknown OS!
-#endif
-
-#ifdef _RAND_IS_WINDOWS
+#ifdef OS_IS_WINDOWS
   #include <winsock.h>
 #endif
-#ifdef _RAND_IS_UNIX
+#ifdef OS_IS_UNIX_OR_APPLE
   #include <unistd.h>
 #endif
 
-#include <ctime>
-#include <cstdlib>
-#include <sstream>
 #include <atomic>
-#include "../core/timer.h"
+#include <cstdlib>
+#include <ctime>
+#include <sstream>
+#include <thread>
+
 #include "../core/global.h"
 #include "../core/hash.h"
+#include "../core/md5.h"
 #include "../core/sha2.h"
-#include "../core/rand.h"
 #include "../core/test.h"
+#include "../core/timer.h"
+#include "../core/bsearch.h"
+
+using namespace std;
 
 XorShift1024Mult::XorShift1024Mult(const uint64_t* init_a)
 {
@@ -192,7 +189,12 @@ static atomic<int> inits(0);
 
 void Rand::init()
 {
+  //Assemble entropy sources
+
+  //Atomic incrementing counter, within this run of this program
   int x = inits++;
+
+  //Various clocks
   uint64_t time0 = (uint64_t)time(NULL);
   uint32_t clock0 = (uint32_t)clock();
   int64_t precisionTime = ClockTimer::getPrecisionSystemTime();
@@ -205,26 +207,26 @@ void Rand::init()
 
   //Mix the hostname and pid into the seed so that starting two things on different computers almost certainly
   //pick different seeds.
-#ifdef _RAND_IS_WINDOWS
+#ifdef OS_IS_WINDOWS
   {
     s += "|";
     DWORD processId = GetCurrentProcessId();
     s += Global::int64ToString((int64_t)processId);
     s += "|";
-    int bufSize = 1024;
+    static const int bufSize = 1024;
     char hostNameBuf[bufSize];
     int result = gethostname(hostNameBuf,bufSize);
     if(result == 0)
       s += string(hostNameBuf);
   }
 #endif
-#ifdef _RAND_IS_UNIX
+#ifdef OS_IS_UNIX_OR_APPLE
   {
     s += "|";
     pid_t processId = getpid();
     s += Global::int64ToString((int64_t)processId);
     s += "|";
-    int bufSize = 1024;
+    static const int bufSize = 1024;
     char hostNameBuf[bufSize];
     int result = gethostname(hostNameBuf,bufSize);
     if(result == 0)
@@ -232,10 +234,33 @@ void Rand::init()
   }
 #endif
 
-  uint64_t hash[4];
-  SHA2::get256(s.c_str(), hash);
+  //Mix thread id.
+  {
+    std::hash<std::thread::id> hashOfThread;
+    size_t hash = hashOfThread(std::this_thread::get_id());
+    s += "|";
+    s += Global::uint64ToHexString((uint64_t)hash);
+  }
 
-  init(Global::uint64ToHexString(hash[0]));
+  //Mix address of stack and heap
+  {
+    int stackVal = 0;
+    int* heapVal = new int[1];
+    size_t stackAddr = (size_t)(&stackVal);
+    size_t heapAddr = (size_t)(heapVal);
+    delete[] heapVal;
+    s += "|";
+    s += Global::uint64ToHexString((uint64_t)stackAddr);
+    s += Global::uint64ToHexString((uint64_t)heapAddr);
+  }
+
+  //cout << s << endl;
+
+  char hash[65];
+  SHA2::get256(s.c_str(), hash);
+  testAssert(hash[64] == '\0');
+  string hashed(hash);
+  init(hashed);
 }
 
 void Rand::init(uint64_t seed)
@@ -252,17 +277,33 @@ void Rand::init(const string& seed)
 {
   initSeed = seed;
 
-  string s = seed;
-  int x = 0;
+  string s;
+  {
+    uint32_t hash[4];
+    MD5::get(seed.c_str(), seed.size(), hash);
+    s += "|";
+    s += std::to_string(hash[0]);
+    s += "|";
+    s += seed;
+  }
 
-  auto getNonzero = [&s,&x]() -> uint64_t {
-    uint64_t hash[4];
+  int counter = 0;
+  int nextHashIdx = 4;
+  uint64_t hash[4];
+  auto getNonzero = [&s,&counter,&nextHashIdx,&hash]() -> uint64_t {
+    uint64_t nextValue;
     do {
-      string tmp = s + Global::intToString(x);
-      x += 1;
-      SHA2::get256(tmp.c_str(), hash);
-    } while(hash[0] == 0);
-    return hash[0];
+      if(nextHashIdx >= 4) {
+        string tmp = std::to_string(counter) + s;
+        //cout << tmp << endl;
+        counter += 37;
+        SHA2::get256(tmp.c_str(), hash);
+        nextHashIdx = 0;
+      }
+      nextValue = hash[nextHashIdx];
+      nextHashIdx += 1;
+    } while(nextValue == 0);
+    return nextValue;
   };
 
   uint64_t init_a[XorShift1024Mult::XORMULT_LEN];
@@ -277,28 +318,79 @@ void Rand::init(const string& seed)
   numCalls = 0;
 }
 
-class RandToURNGWrapper {
-public:
-  typedef size_t result_type;
-  Rand* rand;
-  RandToURNGWrapper(Rand* r)
-    :rand(r)
-  {}
-  ~RandToURNGWrapper()
-  {}
+size_t Rand::nextIndexCumulative(const double* cumRelProbs, size_t n)
+{
+  testAssert(n > 0);
+  testAssert(n < 0xFFFFFFFF);
+  double sum = cumRelProbs[n-1];
+  testAssert(std::isfinite(sum));
+  testAssert(sum > 0);
+  double d = nextDouble(sum);
+  size_t r = BSearch::findFirstGt(cumRelProbs,d,0,n);
 
-  static size_t min() { return 0; }
-  static size_t max() { return (size_t)0xFFFFFFFF; }
-  size_t operator()() {
-    return (size_t)rand->nextUInt();
+  //Reachable if nextDouble returned exactly sum.
+  //Under IEEE round-to-nearest this only happens when sum is subnormal or is the smallest normal double,
+  //since nextDouble() is at most 1 - 2^-53 and for larger sums the product rounds to less than sum.
+  //Pick the last index with positive weight, rather than the last index, which might have zero weight.
+  if(r == n) {
+    r = n-1;
+    while(r > 0 && cumRelProbs[r] <= cumRelProbs[r-1])
+      r--;
   }
-};
+  return r;
+}
 
-#include <random>
+
+//Marsaglia and Tsang's algorithm
 double Rand::nextGamma(double a) {
-  std::gamma_distribution<double> distribution(a,1.0);
-  RandToURNGWrapper wrapped(this);
-  return distribution(wrapped);
+  if(!(a > 0.0))
+    throw StringError("Rand::nextGamma: invalid value for a: " + Global::doubleToString(a));
+
+  if(a <= 1.0) {
+    double r = nextGamma(a + 1.0);
+    double inva = 1.0 / a;
+    //Technically in C++, pow(0,0) could be implementation-dependent or result in an error
+    //so we explicitly force the desired behavior
+    double scale = inva == 0.0 ? 1.0 : pow(nextDouble(), inva);
+    return r * scale;
+  }
+
+  double d = a - 1.0/3.0;
+  double c = (1.0/3.0) / sqrt(d);
+
+  while(true) {
+    double x = nextGaussian();
+    double vtmp = 1.0 + c * x;
+    if(vtmp <= 0.0)
+      continue;
+    double v = vtmp * vtmp * vtmp;
+    double u = nextDouble();
+    double xx = x * x;
+    if(u < 1.0 - 0.0331 * xx * xx)
+      return d * v;
+    if(u == 0.0 || log(u) < 0.5 * xx + d * (1.0 - v + log(v)))
+      return d * v;
+  }
+
+  //Numeric analysis notes:
+  // d >= 2/3
+  // c:  0 <= 1/sqrt(9d) <= 0.4 ish
+  // vtmp > 0  vtmp < some large number since gaussian can't return infinity
+  // u [0,1)
+  // v > 0  < some large number
+  // xx >= 0 < some large number
+}
+
+void Rand::fillShuffledUIntRange(size_t n, uint32_t* buf) {
+  if(n >= 0xFFFFffffu)
+    throw StringError("Rand::fillShuffledUIntRange: out of range value for n: " + Global::uint64ToString(n));
+  for(size_t i = 0; i < n; i++) {
+    buf[i] = (uint32_t)i;
+  }
+  for(size_t i = 1; i < n; i++) {
+    size_t r = (size_t)nextUInt(i+1);
+    std::swap(buf[i],buf[r]);
+  }
 }
 
 static void simpleTest()
@@ -306,30 +398,30 @@ static void simpleTest()
   Rand rand("abc");
 
   const uint32_t expected[24] = {
-    0x8d25293fu,
-    0xe87be2d9u,
-    0xc5424597u,
-    0xe0608f99u,
-    0x55dd51f1u,
-    0x8bec9862u,
-    0xf2aaa3bcu,
-    0x077e767du,
-    0xa9e3208eu,
-    0x68bf343du,
-    0xd8f91fa9u,
-    0xe703df24u,
-    0xd382c1feu,
-    0xbcfcb106u,
-    0x10fc902eu,
-    0x4e88ff31u,
-    0x8f003fd8u,
-    0xdebeb950u,
-    0x73a832cfu,
-    0x8b04a3edu,
-    0x5cb5a5c9u,
-    0x36fd9d1fu,
-    0xa5d6e74fu,
-    0x274e20a5u,
+    0x1C6B83BDu,
+    0xFB7677DBu,
+    0x698688D5u,
+    0xA3CD21C3u,
+    0xD0AD5B77u,
+    0x8F889E6Eu,
+    0x22852278u,
+    0xD71A114Du,
+    0x295EF301u,
+    0xAA0CCA48u,
+    0x0B7271BBu,
+    0x4FE798FBu,
+    0x26B4DD4Bu,
+    0x78B77C1Bu,
+    0x231C4DFBu,
+    0x17FB87C6u,
+    0x9CC23870u,
+    0x1C2C2CF7u,
+    0x62D51240u,
+    0xF1D1A7FFu,
+    0x44C45C0Au,
+    0xF93ACFCEu,
+    0x42B1D236u,
+    0xC1069B75u,
   };
 
   for(int i = 0; i<24; i++) {
@@ -340,6 +432,16 @@ static void simpleTest()
       cout << Global::uint32ToHexString(expected[i]) << endl;
       Global::fatalError("Rand generated unexpected values");
     }
+  }
+
+  {
+    uint32_t hash[4];
+    const string s = "The quick brown fox jumps over the lazy dog.";
+    MD5::get(s.c_str(),s.length(),hash);
+    testAssert(hash[0] == 0xC209D9E4);
+    testAssert(hash[1] == 0x1CFBD090);
+    testAssert(hash[2] == 0xADFF68A0);
+    testAssert(hash[3] == 0xD0CB22DF);
   }
 
   char hash[129];
@@ -423,6 +525,65 @@ void Rand::runTests() {
   ostringstream out;
 
   {
+    const char* name = "Bit mixer tests";
+    out << Hash::murmurMix(12345) << endl;
+    out << Hash::murmurMix(298174913) << endl;
+    out << Hash::splitMix64(1234567) << endl;
+    out << Hash::splitMix64((uint64_t)1234567 + (uint64_t)0x9e3779b97f4a7c15ULL) << endl;
+    out << Global::uint64ToHexString(Hash::rrmxmx(0)) << endl;
+    out << Global::uint64ToHexString(Hash::rrmxmx(1)) << endl;
+    out << Global::uint64ToHexString(Hash::rrmxmx(0x0123456789abcdefULL)) << endl;
+    out << Global::uint64ToHexString(Hash::rrmxmx(0xfefefefefefefefeULL)) << endl;
+    out << Global::uint64ToHexString(Hash::nasam(0)) << endl;
+    out << Global::uint64ToHexString(Hash::nasam(1)) << endl;
+    out << Global::uint64ToHexString(Hash::nasam(0xfefefefefefefefeULL)) << endl;
+    string expected = R"%%(
+1716623506685013753
+8421665786179357259
+6457827717110365317
+3203168211198807973
+0000000000000000
+23085D6F7A569905
+C337A528D7E42497
+125C8836F02C998F
+0000000000000000
+9C1A051E07B9E10D
+3289B8F0A1EA039B
+)%%";
+    TestCommon::expect(name,out,expected);
+  }
+
+  for(int i = -10000; i<10000; i++) {
+    {
+      testAssert(i == Global::stringToInt(Global::intToString(i)));
+    }
+    {
+      int64_t x = (int64_t)i;
+      testAssert(x == Global::stringToInt64(Global::int64ToString(x)));
+    }
+    {
+      uint64_t x = (uint64_t)i;
+      testAssert(x == Global::stringToUInt64(Global::uint64ToString(x)));
+    }
+    {
+      uint64_t x = (uint64_t)i;
+      testAssert(x == Global::hexStringToUInt64(Global::uint64ToHexString(x)));
+    }
+    {
+      float x = (float)i / 100.0f;
+      testAssert(x == Global::stringToFloat(Global::floatToString(x)));
+    }
+    {
+      double x = (double)i / 100.0;
+      testAssert(x == Global::stringToDouble(Global::doubleToString(x)));
+    }
+    {
+      double x = (double)i / 1739.3;
+      testAssert(x == Global::stringToDouble(Global::doubleToStringHighPrecision(x)));
+    }
+  }
+
+  {
     const char* name = "Rand tests";
     Rand rand("abc");
 
@@ -459,262 +620,455 @@ void Rand::runTests() {
     out << "rand.nextLogistic()" << endl;
     for(int i = 0; i<16; i++) out << rand.nextLogistic() << endl;
 
-    out << "rand.nextGamma(1)" << endl;
-    for(int i = 0; i<16; i++) out << rand.nextGamma(1) << endl;
-
-    out << "rand.nextGamma(0.1)" << endl;
-    for(int i = 0; i<16; i++) out << rand.nextGamma(0.1) << endl;
-
-    out << "rand.nextGamma(4)" << endl;
-    for(int i = 0; i<16; i++) out << rand.nextGamma(4) << endl;
-
     string expected = R"%%(
 rand.nextUInt()
-2368022847
-3900433113
-3309454743
-3764424601
-1440567793
-2347538530
-4071269308
-125728381
-2850234510
-1757361213
-3640205225
-3875790628
-3548561918
-3170676998
-284987438
-1317601073
+476808125
+4218845147
+1770424533
+2748129731
+3501022071
+2408095342
+579150456
+3608809805
+694088449
+2852964936
+192049595
+1340578043
+649387339
+2025290779
+589057531
+402360262
 rand.nextUInt(27)
-8
-14
-24
-21
-24
-9
-20
 5
-4
-25
-19
-19
-22
-21
-9
+3
+15
+8
+18
+15
 12
+0
+10
+20
+23
+18
+24
+20
+9
+14
 rand.nextInt()
-2032136641
--1484690267
--1162496884
--740885019
-1341706441
-277308650
-546758271
-1569362505
-1722893617
--280154620
--1420292415
--570959358
-631721904
--1703885216
-2121986197
-1409159894
+-334527988
+756912801
+632180158
+-1273579939
+-1918485732
+-1069916434
+-2014707267
+1657792760
+-1002776568
+1890146240
+1996933002
+1450387446
+1700927140
+129162816
+1321628292
+1374562123
 rand.nextInt(-8,8)
-8
-1
-6
-0
-0
--5
--2
-8
--8
-8
--8
-0
 4
+8
+-1
+4
+3
+2
+6
+6
+-2
+5
 -8
--6
--7
+1
+3
+5
+-3
+7
 rand.nextUInt64()
-14418078273872605708
-15656272520058952416
-1815003353704009443
-16763916499353172813
-12487021701330837924
-3078632268415805218
-5899695363489918344
-2316637589152137835
-3936601489392549938
-3172688217440043471
-8729586732234677986
-4188965795452063568
-10742528258072691946
-11328279065428005175
-9328994114736784186
-16748335411137583871
+10638269307294496533
+18411047602699644662
+866485615523685959
+11468038378131977312
+16992521898711914992
+8030137482563021028
+255386410622334748
+17040394105744604861
+8702305142317123362
+7011499938802287143
+14406966689924300975
+17729451932997526225
+6624400776209450803
+14445168003370372628
+12783387423358787378
+15169533704952901762
 rand.nextUInt64(0xFFffffFFFFULL)
-000000A3B324F34A
-0000004458B3422E
-000000E1C37C2662
-00000098B80D8319
-0000004FC0DC3BCF
-000000A13B506E1D
-000000C71DAF87D8
-00000034A1026F53
-000000450CAF1770
-000000CE1FD7E402
-000000318460E228
-0000009FBECC5B03
-000000602629752A
-0000005C170F3F7E
-000000924AE74CD1
-0000000DFEDC1D82
+0000001F6569C181
+00000031F6FA94F6
+0000007D3140612A
+00000030F0CE30AF
+000000DB09241242
+0000002894F80A15
+0000001F9AF78FCF
+000000AA9EEBFBAF
+000000791CD0B9DA
+0000007B5A365995
+000000C65D52AC90
+0000000129D8C5CF
+0000008A81AD3722
+0000004E7F01EA56
+0000000FE3DD0088
+000000F0656F65E2
 rand.nextDouble()
-0.080862
-0.547609
-0.796694
-0.577365
-0.997252
-0.993346
-0.997749
-0.881844
-0.186606
-0.930101
-0.500096
-0.258518
-0.987045
-0.384286
-0.343331
-0.501281
+0.773755
+0.456202
+0.613086
+0.96546
+0.542037
+0.604754
+0.505963
+0.900103
+0.285093
+0.516344
+0.438879
+0.836596
+0.230791
+0.767963
+0.868906
+0.690635
 rand.nextDouble(12)
-8.04997
-9.68375
-6.79008
-5.47923
-2.05584
-3.74097
-9.23618
-3.24588
-0.506804
-6.11743
-2.44672
-6.41922
-3.01077
-7.08368
-10.1102
-3.49022
+7.40591
+2.53628
+1.4952
+8.53554
+1.42112
+11.7662
+9.05463
+4.45068
+8.83543
+3.00543
+7.80766
+7.32897
+7.94891
+4.2592
+5.89748
+4.71898
 rand.nextDouble(-100,100)
-24.5489
--91.3789
--30.2139
-4.20313
--4.4925
-4.33685
-82.1587
--23.792
-26.9889
--1.93572
-60.4881
--54.8498
-37.7642
-77.027
-68.3438
--11.1699
+-72.0807
+-31.9268
+90.4578
+-89.2463
+-72.0024
+87.1695
+-47.2369
+51.9239
+84.0686
+64.4074
+-97.5942
+-22.6104
+21.778
+94.8935
+82.9729
+-72.1948
 rand.nextGaussian()
--1.04102
-1.02086
--2.21387
-1.18239
-0.464025
-0.201022
-0.924891
--1.77215
-0.783248
-0.43083
-1.22297
--0.779088
-0.437384
--0.712373
-0.921093
--0.690558
+-0.967472
+-0.863108
+-1.42761
+1.43227
+0.0918199
+-0.418531
+1.15332
+0.723536
+0.483234
+-0.662346
+0.360351
+-0.374887
+-1.08184
+0.789806
+-0.0137953
+1.43438
 rand.nextLogistic()
--0.949963
--0.309666
-1.25673
-0.0234923
--4.13501
-1.48687
--2.68628
--0.197865
--2.87159
--4.15327
-4.69788
-0.164818
-1.87224
--0.208472
--1.73322
--0.607461
-rand.nextGamma(1)
-0.274704
-0.0744126
-0.471163
-0.0774803
-0.963182
-0.165412
-0.213661
-0.730311
-2.24201
-0.468865
-0.0571607
-0.905897
-2.60238
-0.64582
-0.158352
-0.685324
-rand.nextGamma(0.1)
-0.000316875
-3.15072e-09
-1.08349e-06
-0.108733
-0.00341049
-2.32469e-11
-4.49661e-07
-0.0029474
-0.669966
-1.00563e-08
-0.64905
-7.22175e-13
-1.2857e-07
-0.0177569
-1.85445e-09
-3.17753e-07
-rand.nextGamma(4)
-1.57075
-4.32638
-1.22375
-2.30653
-2.28736
-5.2053
-3.4774
-3.89106
-3.4363
-1.49415
-3.48808
-6.74786
-3.68859
-1.31681
-2.39111
-2.90081
+3.80282
+-0.248743
+-0.0823388
+-2.60478
+-2.13827
+-1.35933
+-0.696443
+-0.469175
+1.11787
+0.845649
+0.690096
+0.598526
+0.345431
+-0.228918
+0.501948
+-3.36977
 )%%";
     TestCommon::expect(name,out,expected);
   }
 
   {
+    const char* name = "nextIndexCumulative tests";
+    Rand rand(name);
+
+    double probs[5] = {1.0, 4.0, 2.5, 0.5, 2.0};
+    double cumProbs[5];
+    for(int i = 0; i<5; i++)
+      cumProbs[i] = (i == 0 ? probs[i] : probs[i] + cumProbs[i-1]);
+
+    int frequencies[5] = {0,0,0,0,0};
+    for(int i = 0; i<10000; i++) {
+      int r = (int)rand.nextIndexCumulative(cumProbs,5);
+      testAssert(r >= 0 && r < 5);
+      frequencies[r]++;
+    }
+    for(int i = 0; i<5; i++)
+      out << frequencies[i] << endl;
+
+    string expected = R"%%(
+1014
+3923
+2469
+525
+2069
+)%%";
+    TestCommon::expect(name,out,expected);
+  }
+
+  {
+    const char* name = "Gamma tests";
+    Rand rand("def");
+
+    double tinySubnormal = 4.9406564584124654e-324;
+    double tinyNormal = 2.2250738585072014e-308;
+    double maxDouble = 1.7976931348623157e308;
+    out << "pow(0.5,1e300) " << pow(0.5, 1.0e300) << endl;
+    out << "tinySubnormal " << Global::strprintf("%.10g",tinySubnormal) << endl;
+    out << "tinyNormal " << Global::strprintf("%.10g",tinyNormal) << endl;
+    out << "maxDouble " << Global::strprintf("%.10g",maxDouble) << endl;
+    out << "log(tinySubnormal) " << Global::strprintf("%.10g",log(tinySubnormal)) << endl;
+    out << "log(tinyNormal) " << Global::strprintf("%.10g",log(tinyNormal)) << endl;
+
+    out << "rand.nextGamma(tinySubnormal)" << endl;
+    for(int i = 0; i<16; i++) out << rand.nextGamma(tinySubnormal) << endl;
+    out << "rand.nextGamma(tinyNormal)" << endl;
+    for(int i = 0; i<16; i++) out << rand.nextGamma(tinyNormal) << endl;
+    out << "rand.nextGamma(0.001)" << endl;
+    for(int i = 0; i<16; i++) out << rand.nextGamma(0.001) << endl;
+    out << "rand.nextGamma(0.1)" << endl;
+    for(int i = 0; i<16; i++) out << rand.nextGamma(0.1) << endl;
+    out << "rand.nextGamma(1)" << endl;
+    for(int i = 0; i<16; i++) out << rand.nextGamma(1) << endl;
+    out << "rand.nextGamma(1.0000000000001)" << endl;
+    for(int i = 0; i<16; i++) out << rand.nextGamma(1.0000000000001) << endl;
+    out << "rand.nextGamma(4)" << endl;
+    for(int i = 0; i<16; i++) out << rand.nextGamma(4) << endl;
+    out << "rand.nextGamma(100)" << endl;
+    for(int i = 0; i<16; i++) out << rand.nextGamma(100) << endl;
+    out << "rand.nextGamma(1e308)" << endl;
+    for(int i = 0; i<8; i++) out << rand.nextGamma(1e308) << endl;
+    out << "rand.nextGamma(maxDouble)" << endl;
+    for(int i = 0; i<8; i++) out << rand.nextGamma(maxDouble) << endl;
+
+    string expected = R"%%(
+pow(0.5,1e300) 0
+tinySubnormal 4.940656458e-324
+tinyNormal 2.225073859e-308
+maxDouble 1.797693135e+308
+log(tinySubnormal) -744.4400719
+log(tinyNormal) -708.3964185
+rand.nextGamma(tinySubnormal)
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+rand.nextGamma(tinyNormal)
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+0
+rand.nextGamma(0.001)
+1.05907e-101
+1.79564e-171
+0
+3.99929e-164
+0
+0
+1.86086e-92
+0
+0
+0
+6.21457e-150
+5.98916e-180
+0
+0
+0
+1.24842e-40
+rand.nextGamma(0.1)
+4.0043e-05
+0.111808
+0.015495
+2.33564e-16
+0.513398
+2.35636
+0.000129372
+0.000854086
+0.00742527
+0.0990275
+6.59447e-08
+5.98863e-05
+7.90218e-19
+4.9846e-11
+0.0923923
+0.0258861
+rand.nextGamma(1)
+2.12756
+4.84922
+0.171508
+0.341829
+0.207699
+1.0533
+0.40069
+3.39204
+3.79859
+0.115891
+0.277927
+0.133629
+1.1966
+0.185524
+0.40222
+0.765241
+rand.nextGamma(1.0000000000001)
+1.71238
+1.35466
+0.866271
+0.263334
+0.197441
+0.532812
+1.97214
+1.42988
+0.151373
+1.52947
+0.0350315
+1.02099
+0.893285
+0.840119
+1.09308
+1.05674
+rand.nextGamma(4)
+4.73018
+2.71548
+1.46158
+3.56187
+7.45509
+0.930581
+3.03565
+4.60005
+7.72403
+2.25881
+4.60951
+2.17532
+1.8698
+6.90699
+2.49718
+0.647821
+rand.nextGamma(100)
+108.41
+107.61
+93.1365
+118.167
+84.7977
+89.0776
+112.248
+110.362
+98.8992
+104.624
+101.665
+87.0437
+80.8363
+93.7856
+100.486
+98.0087
+rand.nextGamma(1e308)
+1e+308
+1e+308
+1e+308
+1e+308
+1e+308
+1e+308
+1e+308
+1e+308
+rand.nextGamma(maxDouble)
+1.79769e+308
+1.79769e+308
+1.79769e+308
+1.79769e+308
+1.79769e+308
+1.79769e+308
+1.79769e+308
+1.79769e+308
+)%%";
+    TestCommon::expect(name,out,expected);
+
+    if(std::numeric_limits<double>::is_iec559 && std::numeric_limits<double>::has_infinity) {
+      double inf = INFINITY;
+      out << "pow(0.5,inf) " << pow(0.5, inf) << endl;
+      out << "pow(1.0,inf) " << pow(1.0, inf) << endl;
+      out << "log(0) " << Global::doubleToString(log(0.0)) << endl;
+      out << "rand.nextGamma(inf)" << endl;
+      for(int i = 0; i<8; i++) out << rand.nextGamma(inf) << endl;
+      expected = R"%%(
+pow(0.5,inf) 0
+pow(1.0,inf) 1
+log(0) -inf
+rand.nextGamma(inf)
+inf
+inf
+inf
+inf
+inf
+inf
+inf
+inf
+)%%";
+      TestCommon::expect(name,out,expected);
+    }
+
+  }
+
+  {
     const char* name = "Rand moment tests";
 
-    int bufLen = 100000;
+    int bufLen = 200000;
     double* buf = new double[bufLen];
 
     auto printMoments = [&out,&buf,bufLen](const string& distrName, double expectedMean, double expectedVariance, double expectedSkew, double expectedExcessKurt) {
@@ -765,35 +1119,90 @@ rand.nextGamma(4)
     printMoments("Logistic", 0, pi*pi/3.0, 0, 1.2);
 
     for(int i = 0; i<bufLen; i++)
+      buf[i] = rand.nextExponential();
+    printMoments("Exponential", 1.0, 1.0, 2.0, 6.0);
+
+    for(int i = 0; i<bufLen; i++)
+      buf[i] = rand.nextGamma(0.05);
+    printMoments("Gamma(0.05)", 0.05, 0.05, 2.0/sqrt(0.05), 6.0/0.05);
+
+    for(int i = 0; i<bufLen; i++)
       buf[i] = rand.nextGamma(0.5);
-    printMoments("Gamma", 0.5, 0.5, 2.0/sqrt(0.5), 6.0/0.5);
+    printMoments("Gamma(0,5)", 0.5, 0.5, 2.0/sqrt(0.5), 6.0/0.5);
+
+    for(int i = 0; i<bufLen; i++)
+      buf[i] = rand.nextGamma(1.01);
+    printMoments("Gamma(1.01)", 1.01, 1.01, 2.0/sqrt(1.01), 6.0/1.01);
 
     for(int i = 0; i<bufLen; i++)
       buf[i] = rand.nextGamma(4.0);
-    printMoments("Gamma", 4.0, 4.0, 2.0/sqrt(4.0), 6.0/4.0);
+    printMoments("Gamma(4.0)", 4.0, 4.0, 2.0/sqrt(4.0), 6.0/4.0);
 
-    for(int i = 0; i<bufLen; i++)
-      buf[i] = rand.nextExponential();
-    printMoments("Exponential", 1.0, 1.0, 2.0, 6.0);
-    
     delete[] buf;
     string expected = R"%%(
-Uniform sample: Mean 0.499714 Variance 0.083704 Skew 0.003446 ExcessKurt -1.202311
+Uniform sample: Mean 0.499861 Variance 0.083304 Skew 0.000470 ExcessKurt -1.198536
 Uniform expected: Mean 0.500000 Variance 0.083333 Skew 0.000000 ExcessKurt -1.200000
-Gaussian sample: Mean -0.000782 Variance 1.001046 Skew 0.015581 ExcessKurt 0.012558
+Gaussian sample: Mean -0.002168 Variance 1.009814 Skew -0.006133 ExcessKurt 0.009611
 Gaussian expected: Mean 0.000000 Variance 1.000000 Skew 0.000000 ExcessKurt 0.000000
-Logistic sample: Mean 0.003819 Variance 3.283142 Skew 0.003153 ExcessKurt 1.149271
+Logistic sample: Mean -0.006190 Variance 3.288051 Skew 0.004409 ExcessKurt 1.217031
 Logistic expected: Mean 0.000000 Variance 3.289868 Skew 0.000000 ExcessKurt 1.200000
-Gamma sample: Mean 0.499243 Variance 0.497366 Skew 2.832579 ExcessKurt 12.005515
-Gamma expected: Mean 0.500000 Variance 0.500000 Skew 2.828427 ExcessKurt 12.000000
-Gamma sample: Mean 3.998701 Variance 3.992548 Skew 0.986482 ExcessKurt 1.410314
-Gamma expected: Mean 4.000000 Variance 4.000000 Skew 1.000000 ExcessKurt 1.500000
-Exponential sample: Mean 0.993535 Variance 0.978654 Skew 1.999058 ExcessKurt 5.925246
+Exponential sample: Mean 1.004176 Variance 1.015094 Skew 2.038615 ExcessKurt 6.431784
 Exponential expected: Mean 1.000000 Variance 1.000000 Skew 2.000000 ExcessKurt 6.000000
+Gamma(0.05) sample: Mean 0.049499 Variance 0.049302 Skew 8.716963 ExcessKurt 108.076402
+Gamma(0.05) expected: Mean 0.050000 Variance 0.050000 Skew 8.944272 ExcessKurt 120.000000
+Gamma(0,5) sample: Mean 0.496322 Variance 0.492312 Skew 2.839173 ExcessKurt 12.203226
+Gamma(0,5) expected: Mean 0.500000 Variance 0.500000 Skew 2.828427 ExcessKurt 12.000000
+Gamma(1.01) sample: Mean 1.007725 Variance 1.012255 Skew 2.011365 ExcessKurt 6.055355
+Gamma(1.01) expected: Mean 1.010000 Variance 1.010000 Skew 1.990074 ExcessKurt 5.940594
+Gamma(4.0) sample: Mean 4.002986 Variance 4.015291 Skew 1.007541 ExcessKurt 1.536908
+Gamma(4.0) expected: Mean 4.000000 Variance 4.000000 Skew 1.000000 ExcessKurt 1.500000
 )%%";
 
     TestCommon::expect(name,out,expected);
   }
 
+  {
+    const char* name = "Shuffle tests";
+    Rand rand("shuffletest!");
+    std::vector<uint32_t> buf(32,99);
+    rand.fillShuffledUIntRange(16,buf.data()+8);
+    for(int i = 0; i<32; i++) {
+      out << buf[i] << endl;
+    }
+    string expected = R"%%(
+99
+99
+99
+99
+99
+99
+99
+99
+6
+9
+10
+11
+1
+15
+2
+12
+7
+14
+8
+4
+5
+13
+0
+3
+99
+99
+99
+99
+99
+99
+99
+99
+)%%";
+    TestCommon::expect(name,out,expected);
+  }
 }
-

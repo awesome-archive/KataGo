@@ -1,9 +1,13 @@
+#include "../core/hash.h"
+
+#include "../core/sha2.h"
+
 /*
  * hash.cpp
  * Author: David Wu
  */
 
-#include "../core/hash.h"
+using namespace std;
 
 //BITS-----------------------------------
 
@@ -27,6 +31,10 @@ uint64_t Hash::basicLCong(uint64_t x)
 {
   return 2862933555777941757ULL*x + 3037000493ULL;
 }
+uint64_t Hash::basicLCong2(uint64_t x)
+{
+  return 6364136223846793005ULL*x + 1442695040888963407ULL;
+}
 
 //MurmurHash3 finalization - good avalanche properties
 //Reversible, but maps 0 -> 0
@@ -39,6 +47,40 @@ uint64_t Hash::murmurMix(uint64_t x)
   x ^= x >> 33;
   return x;
 }
+
+//Splitmix64 mixing step
+uint64_t Hash::splitMix64(uint64_t x)
+{
+  x = x + 0x9e3779b97f4a7c15ULL;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+  return x ^ (x >> 31);
+}
+
+static uint64_t rotateRight(uint64_t x, int r) {
+  return (x >> r) | (x << (64 - r));
+}
+
+//algorithm from Pelle Evensen https://mostlymangling.blogspot.com/
+uint64_t Hash::rrmxmx(uint64_t x)
+{
+  x ^= rotateRight(x,49) ^ rotateRight(x,24);
+  x *= 0x9fb21c651e98df25ULL;
+  x ^= x >> 28;
+  x *= 0x9fb21c651e98df25ULL;
+  return x ^ (x >> 28);
+}
+//algorithm from Pelle Evensen https://mostlymangling.blogspot.com/
+uint64_t Hash::nasam(uint64_t x)
+{
+  x ^= rotateRight(x,25) ^ rotateRight(x,47);
+  x *= 0x9e6c63d0676a9a99ULL;
+  x ^= (x >> 23) ^ (x >> 51);
+  x *= 0x9e6d62d06f6a9a9bULL;
+  x ^= (x >> 23) ^ (x >> 51);
+  return x;
+}
+
 
 //Robert Jenkins' 96 bit Mix Function
 uint32_t Hash::jenkinsMixSingle(uint32_t a, uint32_t b, uint32_t c)
@@ -110,6 +152,15 @@ uint64_t Hash::simpleHash(const int* input, int len)
   return combine(hi ^ m4, lo + m4);
 }
 
+double Hash::seededHashFloat(const std::string& str, const std::string& seed) {
+  string s = seed + "|" + str;
+  uint64_t hash[4];
+  SHA2::get256(s.c_str(), hash);
+  uint64_t bits = hash[0] & ((1ULL << 53)-1ULL);
+  double x = (double)bits / (double)(1ULL << 53);
+  return x;
+}
+
 //Hash128------------------------------------------------------------------------
 
 ostream& operator<<(ostream& out, const Hash128 other)
@@ -119,4 +170,22 @@ ostream& operator<<(ostream& out, const Hash128 other)
   return out;
 }
 
+string Hash128::toString() const {
+  return Global::uint64ToHexString(hash1) + Global::uint64ToHexString(hash0);
+}
 
+Hash128 Hash128::ofString(const string& s) {
+  if(s.size() != 32)
+    throw IOError("Could not parse as Hash128: " + s);
+  for(char c: s) {
+    if(!(c >= '0' && c <= '9') &&
+       !(c >= 'A' && c <= 'F') &&
+       !(c >= 'a' && c <= 'f')
+    ) {
+      throw IOError("Could not parse as Hash128: " + s);
+    }
+  }
+  uint64_t h1 = Global::hexStringToUInt64(s.substr(0,16));
+  uint64_t h0 = Global::hexStringToUInt64(s.substr(16,16));
+  return Hash128(h0,h1);
+}

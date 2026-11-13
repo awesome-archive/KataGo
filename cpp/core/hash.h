@@ -3,10 +3,11 @@
  * Author: David Wu
  */
 
-#ifndef HASH_H_
-#define HASH_H_
+#ifndef CORE_HASH_H_
+#define CORE_HASH_H_
 
 #include <iostream>
+
 #include "../core/global.h"
 
 namespace Hash
@@ -17,13 +18,23 @@ namespace Hash
   uint64_t combine(uint32_t hi, uint32_t lo);
 
   uint64_t basicLCong(uint64_t x);
+  uint64_t basicLCong2(uint64_t x);
+
+  //Bit mixers
   uint64_t murmurMix(uint64_t x);
+  uint64_t splitMix64(uint64_t x);
+  uint64_t rrmxmx(uint64_t x);
+  uint64_t nasam(uint64_t x);
 
   void jenkinsMix(uint32_t& a, uint32_t& b, uint32_t& c);
   uint32_t jenkinsMixSingle(uint32_t a, uint32_t b, uint32_t c);
 
   uint64_t simpleHash(const char* str);
   uint64_t simpleHash(const int* input, int len);
+
+  //Return value in [0,1) deterministically based on seeded hash. Note that 1.0 might
+  //be possible depending on how float math is configured
+  double seededHashFloat(const std::string& str, const std::string& seed);
 }
 
 //Hash is "little endian" in the sense that if you printed out hash1, then hash0, you would
@@ -51,7 +62,9 @@ struct Hash128
   Hash128& operator|=(const Hash128 other);
   Hash128& operator&=(const Hash128 other);
 
-  friend ostream& operator<<(ostream& out, const Hash128 other);
+  friend std::ostream& operator<<(std::ostream& out, const Hash128 other);
+  std::string toString() const;
+  static Hash128 ofString(const std::string& s);
 };
 
 inline Hash128::Hash128()
@@ -121,4 +134,4 @@ inline Hash128& Hash128::operator&=(const Hash128 other) {
 }
 
 
-#endif /* HASH_H_ */
+#endif  // CORE_HASH_H_

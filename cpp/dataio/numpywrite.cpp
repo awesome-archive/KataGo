@@ -1,7 +1,13 @@
-
 #include "../dataio/numpywrite.h"
+
 #include <cstring>
+#include "../core/test.h"
+
+#ifndef NO_LIBZIP
 #include <zip.h>
+#endif
+
+using namespace std;
 
 #if !defined(BYTE_ORDER) || (BYTE_ORDER != LITTLE_ENDIAN && BYTE_ORDER != BIG_ENDIAN)
 #error Define BYTE_ORDER to be equal to either LITTLE_ENDIAN or BIG_ENDIAN
@@ -93,9 +99,9 @@ NumpyBuffer<T>::NumpyBuffer(const vector<int64_t>& shp, const char* dt)
   : shape(shp),dtype(dt)
 {
   dataLen = 1;
-  assert(shape.size() > 0);
+  testAssert(shape.size() > 0);
   for(size_t i = 0; i<shape.size(); i++) {
-    assert(shape[i] >= 0);
+    testAssert(shape[i] >= 0);
     if((uint64_t)dataLen * (uint64_t)shape[i] < (uint64_t)dataLen)
       throw StringError("NumpyBuffer shape overflows");
     dataLen *= shape[i];
@@ -103,17 +109,17 @@ NumpyBuffer<T>::NumpyBuffer(const vector<int64_t>& shp, const char* dt)
 
   //Leave 256 bytes at the start for the header
   int sizeOfT = sizeof(T);
-  assert(sizeOfT > 0 && sizeOfT <= TOTAL_HEADER_BYTES);
+  testAssert(sizeOfT > 0 && sizeOfT <= TOTAL_HEADER_BYTES);
 
   headerLen = TOTAL_HEADER_BYTES / sizeOfT;
-  assert(headerLen * sizeOfT == TOTAL_HEADER_BYTES);
+  testAssert(headerLen * sizeOfT == TOTAL_HEADER_BYTES);
 
   dataIncludingHeader = new T[headerLen+dataLen];
   data = dataIncludingHeader + headerLen;
 
   //Go ahead and write all the magic bytes and such
   char* s = (char*)dataIncludingHeader;
-  s[0] = 0x93;
+  s[0] = (char)0x93;
   s[1] = 'N';
   s[2] = 'U';
   s[3] = 'M';
@@ -144,7 +150,7 @@ NumpyBuffer<T>::~NumpyBuffer() {
 }
 
 template <typename T>
-int64_t NumpyBuffer<T>::getActualDataLen(int64_t numWriteableRows) {
+int64_t NumpyBuffer<T>::getActualDataLen(int64_t numWriteableRows) const {
   int64_t actualDataLen = 1;
   for(size_t i = 0; i<shape.size(); i++) {
     int64_t x = (i == 0) ? numWriteableRows : shape[i];
@@ -162,7 +168,7 @@ int64_t NumpyBuffer<T>::getActualDataLen(int64_t numWriteableRows) {
 template <typename T>
 uint64_t NumpyBuffer<T>::prepareHeaderWithNumRows(int64_t numWriteableRows) {
   //Continue writing the shape
-  int idx = shapeStartByte;
+  size_t idx = shapeStartByte;
   char* s = (char*)dataIncludingHeader;
 
   //Write each number
@@ -231,6 +237,35 @@ template struct NumpyBuffer<int16_t>;
 template struct NumpyBuffer<int32_t>;
 template struct NumpyBuffer<int64_t>;
 
+#ifdef NO_LIBZIP
+
+static void throwZipError() {
+  throw StringError("KataGo was built without libzip library, unable to create zip file or write training data");
+}
+
+ZipFile::ZipFile(const string& fName)
+  :fileName(fName),file(NULL)
+{
+  (void)file;
+  throwZipError();
+}
+
+ZipFile::~ZipFile() {
+}
+
+void ZipFile::writeBuffer(const char* nameWithinZip, void* data, uint64_t numBytes) {
+  (void)nameWithinZip;
+  (void)data;
+  (void)numBytes;
+  throwZipError();
+}
+
+void ZipFile::close() {
+  throwZipError();
+}
+
+#else
+
 struct ZipError {
   zip_error_t value;
   ZipError() { zip_error_init(&value); }
@@ -286,6 +321,7 @@ void ZipFile::close() {
     file = NULL;
 }
 
+#endif
 
 // void test() {
 //   string fileName = "abc.npz";

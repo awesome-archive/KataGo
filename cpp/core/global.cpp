@@ -1,22 +1,21 @@
+#include "../core/global.h"
+
 /*
  * global.cpp
  * Author: David Wu
  */
 
-#include <cstdio>
-#include <cstdarg>
-#include <fstream>
-#include <sstream>
-#include <cstdlib>
-#include <ctime>
 #include <cctype>
-#include <cstring>
-#include <dirent.h> //TODO this is not portable to windows, use C++17 filesystem library when C++17 is available
-#include <inttypes.h>
-#include <sys/types.h>
 #include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <cinttypes>
 #include <iomanip>
-#include "global.h"
+#include <sstream>
+
 using namespace std;
 
 //ERRORS----------------------------------
@@ -24,28 +23,13 @@ using namespace std;
 void Global::fatalError(const char* s)
 {
   cout << "\nFATAL ERROR:\n" << s << endl;
-  exit(EXIT_FAILURE);
+  quick_exit(EXIT_FAILURE);
 }
 
 void Global::fatalError(const string& s)
 {
   cout << "\nFATAL ERROR:\n" << s << endl;
-  exit(EXIT_FAILURE);
-}
-
-//TIME------------------------------------
-
-string Global::getDateString()
-{
-  time_t rawtime;
-  time(&rawtime);
-  tm* ptm = gmtime(&rawtime);
-
-  ostringstream out;
-  out << (ptm->tm_year+1900) << "-"
-      << (ptm->tm_mon+1) << "-"
-      << (ptm->tm_mday);
-  return out.str();
+  quick_exit(EXIT_FAILURE);
 }
 
 //STRINGS---------------------------------
@@ -80,6 +64,14 @@ string Global::floatToString(float x)
 string Global::doubleToString(double x)
 {
   stringstream ss;
+  ss << x;
+  return ss.str();
+}
+
+string Global::doubleToStringHighPrecision(double x)
+{
+  stringstream ss;
+  ss.precision(17);
   ss << x;
   return ss.str();
 }
@@ -123,6 +115,13 @@ string Global::uint64ToHexString(uint64_t x)
   for(size_t i = 0; i < hex_len; i++)
     s[hex_len-i-1] = digits[(x >> (i*4)) & 0x0f];
   return s;
+}
+
+string Global::sizeToString(size_t x)
+{
+  stringstream ss;
+  ss << x;
+  return ss.str();
 }
 
 bool Global::tryStringToInt(const string& str, int& x)
@@ -192,28 +191,51 @@ bool Global::stringToBool(const string& str)
 bool Global::tryStringToUInt64(const string& str, uint64_t& x)
 {
   uint64_t val = 0;
-  istringstream in(trim(str));
+  string s = trim(str);
+  if(s.size() > 0 && s[0] == '-')
+    return false;
+  istringstream in(s);
   in >> val;
   if(in.fail() || in.peek() != EOF)
-  {
-    istringstream inhex(trim(str));
-    inhex >> hex >> val;
-    if(inhex.fail() || inhex.peek() != EOF)
+    return false;
+  x = val;
+  return true;
+}
+
+bool Global::tryHexStringToUInt64(const string& str, uint64_t& x)
+{
+  uint64_t val = 0;
+  for(char c: str) {
+    if(!(c >= '0' && c <= '9') &&
+       !(c >= 'A' && c <= 'F') &&
+       !(c >= 'a' && c <= 'f')
+    ) {
       return false;
-    x = val;
-    return true;
+    }
   }
+  istringstream in(str);
+  in >> std::hex >> val;
+  if(in.fail() || in.peek() != EOF)
+    return false;
   x = val;
   return true;
 }
 
 uint64_t Global::stringToUInt64(const string& str)
 {
-  uint64_t val = 0;
-  istringstream in(trim(str));
-  in >> val;
-  if(in.fail() || in.peek() != EOF)
+  uint64_t val;
+  bool suc = tryStringToUInt64(str,val);
+  if(!suc)
     throw IOError(string("could not parse uint64: ") + str);
+  return val;
+}
+
+uint64_t Global::hexStringToUInt64(const string& str)
+{
+  uint64_t val;
+  bool suc = tryHexStringToUInt64(str,val);
+  if(!suc)
+    throw IOError(string("could not parse uint64 from hex: ") + str);
   return val;
 }
 
@@ -261,12 +283,12 @@ double Global::stringToDouble(const string& str)
 
 bool Global::isWhitespace(char c)
 {
-  return contains(" \t\r\n",c);
+  return contains(" \t\r\n\v\f",c);
 }
 
 bool Global::isWhitespace(const string& s)
 {
-  size_t p = s.find_first_not_of(" \t\r\n");
+  size_t p = s.find_first_not_of(" \t\r\n\v\f");
   return p == string::npos;
 }
 
@@ -285,13 +307,25 @@ bool Global::isSuffix(const string& s, const string& suffix)
   return result == 0;
 }
 
-
-string Global::trim(const string& s)
+string Global::chopPrefix(const string& s, const string& prefix)
 {
-  size_t p2 = s.find_last_not_of(" \t\r\n");
+  if(!isPrefix(s,prefix))
+    throw StringError("Global::chopPrefix: \n" + prefix + "\nis not a prefix of\n" + s);
+  return s.substr(prefix.size());
+}
+string Global::chopSuffix(const string& s, const string& suffix)
+{
+  if(!isSuffix(s,suffix))
+    throw StringError("Global::chopSuffix: \n" + suffix + "\nis not a suffix of\n" + s);
+  return s.substr(0,s.size()-suffix.size());
+}
+
+string Global::trim(const std::string &s, const char* delims)
+{
+  size_t p2 = s.find_last_not_of(delims);
   if (p2 == string::npos)
     return string();
-  size_t p1 = s.find_first_not_of(" \t\r\n");
+  size_t p1 = s.find_first_not_of(delims);
   if (p1 == string::npos)
     p1 = 0;
 
@@ -409,7 +443,7 @@ static string vformat (const char *fmt, va_list ap)
   // Allocate a buffer on the stack that's big enough for us almost
   // all the time.  Be prepared to allocate dynamically if it doesn't fit.
   size_t size = 4096;
-  char stackbuf[size];
+  char stackbuf[4096];
   std::vector<char> dynamicbuf;
   char *buf = &stackbuf[0];
 
@@ -460,7 +494,7 @@ bool Global::isDigits(const string& str)
   return isDigits(str,0,str.size());
 }
 
-bool Global::isDigits(const string& str, int start, int end)
+bool Global::isDigits(const string& str, size_t start, size_t end)
 {
   //Too long to fit in integer for sure?
   if(end <= start)
@@ -468,9 +502,9 @@ bool Global::isDigits(const string& str, int start, int end)
   if(end-start > 9)
     return false;
 
-  int size = str.size();
+  size_t size = str.size();
   int64_t value = 0;
-  for(int i = start; i<end && i<size; i++)
+  for(size_t i = start; i<end && i<size; i++)
   {
     char c = str[i];
     if(!isDigit(c))
@@ -489,7 +523,7 @@ int Global::parseDigits(const string& str)
   return parseDigits(str,0,str.size());
 }
 
-int Global::parseDigits(const string& str, int start, int end)
+int Global::parseDigits(const string& str, size_t start, size_t end)
 {
   //Too long to fit in integer for sure?
   if(end <= start)
@@ -497,9 +531,9 @@ int Global::parseDigits(const string& str, int start, int end)
   if(end-start > 9)
     throw IOError("Could not parse digits, overflow: " + str.substr(start,end-start));
 
-  int size = str.size();
+  size_t size = str.size();
   int64_t value = 0;
-  for(int i = start; i<end && i<size; i++)
+  for(size_t i = start; i<end && i<size; i++)
   {
     char c = str[i];
     if(!isDigit(c))
@@ -606,13 +640,6 @@ string Global::stripComments(const string& str)
   return result;
 }
 
-string Global::getCompactDateTimeString() {
-  time_t time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-  ostringstream out;
-  out << std::put_time(std::localtime(&time), "%Y%m%d-%H%M%S");
-  return out.str();
-}
-
 uint64_t Global::readMem(const string& str)
 {
   if(str.size() < 2)
@@ -659,85 +686,23 @@ uint64_t Global::readMem(const char* str)
   return readMem(string(str));
 }
 
-
-//IO-------------------------------------
-
-//Read entire file whole
-string Global::readFile(const char* filename)
-{
-  ifstream ifs(filename);
-  if(!ifs.good())
-    throw IOError(string("File not found: ") + filename);
-  string str((istreambuf_iterator<char>(ifs)), istreambuf_iterator<char>());
-  return str;
-}
-
-string Global::readFile(const string& filename)
-{
-  return readFile(filename.c_str());
-}
-
-//Read file into separate lines, using the specified delimiter character(s).
-//The delimiter characters are NOT included.
-vector<string> Global::readFileLines(const char* filename, char delimiter)
-{
-  ifstream ifs(filename);
-  if(!ifs.good())
-    throw IOError(string("File not found: ") + filename);
-
-  vector<string> vec;
-  string line;
-  while(getline(ifs,line,delimiter))
-    vec.push_back(line);
-  return vec;
-}
-
-vector<string> Global::readFileLines(const string& filename, char delimiter)
-{
-  return readFileLines(filename.c_str(), delimiter);
-}
-
-
-//TODO this is not portable to windows, reimplement with C++17 filesystem library when C++17 is available
-void Global::collectFiles(const string& dirname, std::function<bool(const string&)> fileFilter, vector<string>& collected)
-{
-  DIR *dir;
-  struct dirent *entry;
-
-  if(!(dir = opendir(dirname.c_str()))) {
-    cerr << "Error (" << errno << ") opening " << dirname << endl;
-    return;
-  }
-
-  while ((entry = readdir(dir)) != NULL) {
-    if(entry->d_type == DT_DIR) {
-      if(strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-        continue;
-      const string subPath = dirname + "/" + entry->d_name;
-      collectFiles(subPath,fileFilter,collected);
-    }
-    else {
-      string fileName = string(entry->d_name);
-      if(fileFilter(fileName))
-        collected.push_back(dirname + "/" + fileName);
-    }
-  }
-  closedir(dir);
-}
-
-
-//USER IO----------------------------
-
 void Global::pauseForKey()
 {
   cout << "Press any key to continue..." << endl;
   cin.get();
 }
 
-
-
-
-
-
-
-
+double Global::roundStatic(double x, double inverseScale) {
+  return round(x * inverseScale) / inverseScale;
+}
+double Global::roundDynamic(double x, int precision) {
+  double absx = std::fabs(x);
+  if(absx <= 1e-60)
+    return x;
+  int orderOfMagnitude = (int)floor(log10(absx));
+  int roundingMagnitude = orderOfMagnitude - precision;
+  if(roundingMagnitude >= 0)
+    return round(x);
+  double inverseScale = pow(10.0,-roundingMagnitude);
+  return roundStatic(x, inverseScale);
+}

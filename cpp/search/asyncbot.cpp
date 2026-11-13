@@ -1,6 +1,10 @@
-
-#include "../core/timer.h"
 #include "../search/asyncbot.h"
+
+#include "../core/test.h"
+#include "../core/timer.h"
+#include "../search/reportedsearchvalues.h"
+
+using namespace std;
 
 static void searchThreadLoop(AsyncBot* asyncBot, Logger* logger) {
   try {
@@ -17,21 +21,52 @@ static void searchThreadLoop(AsyncBot* asyncBot, Logger* logger) {
   }
 }
 
-AsyncBot::AsyncBot(SearchParams params, NNEvaluator* nnEval, Logger* l, const string& randSeed)
-  :search(NULL),logger(l),
+AsyncBot::AsyncBot(
+  const SearchParams& params,
+  NNEvaluator* nnEval,
+  Logger* l,
+  const string& randSeed
+)
+  :search(NULL),
    controlMutex(),threadWaitingToSearch(),userWaitingForStop(),searchThread(),
    isRunning(false),isPondering(false),isKilled(false),shouldStopNow(false),
-   queuedSearchId(0),queuedOnMove(),timeControls(),searchFactor(1.0)
+   queuedSearchId(0),queuedOnMove(),timeControls(),searchFactor(1.0),
+   analyzeCallbackPeriod(-1),
+   analyzeFirstCallbackAfter(-1),
+   analyzeCallback(),
+   searchBegunCallback()
 {
-  search = new Search(params,nnEval,randSeed);
+  search = new Search(params,nnEval,l,randSeed);
+  searchThread = std::thread(searchThreadLoop,this,l);
+}
+
+AsyncBot::AsyncBot(
+  const SearchParams& params,
+  NNEvaluator* nnEval,
+  NNEvaluator* humanEval,
+  Logger* l,
+  const string& randSeed
+)
+  :search(NULL),
+   controlMutex(),threadWaitingToSearch(),userWaitingForStop(),searchThread(),
+   isRunning(false),isPondering(false),isKilled(false),shouldStopNow(false),
+   queuedSearchId(0),queuedOnMove(),timeControls(),searchFactor(1.0),
+   analyzeCallbackPeriod(-1),
+   analyzeFirstCallbackAfter(-1),
+   analyzeCallback(),
+   searchBegunCallback()
+{
+  search = new Search(params,nnEval,humanEval,l,randSeed);
   searchThread = std::thread(searchThreadLoop,this,l);
 }
 
 AsyncBot::~AsyncBot() {
   stopAndWait();
-  assert(!isRunning);
-  assert(!isKilled);
-  isKilled = true;
+  testAssert(!isRunning);
+  {
+    lock_guard<std::mutex> lock(controlMutex);
+    isKilled = true;
+  }
   threadWaitingToSearch.notify_all();
   searchThread.join();
   delete search;
@@ -47,11 +82,18 @@ const BoardHistory& AsyncBot::getRootHist() const {
 Player AsyncBot::getRootPla() const {
   return search->rootPla;
 }
+Player AsyncBot::getPlayoutDoublingAdvantagePla() const {
+  return search->getPlayoutDoublingAdvantagePla();
+}
 
-Search* AsyncBot::getSearch() {
+Search* AsyncBot::getSearchStopAndWait() {
+  stopAndWait();
   return search;
 }
-SearchParams AsyncBot::getParams() const {
+const Search* AsyncBot::getSearch() const {
+  return search;
+}
+const SearchParams& AsyncBot::getParams() const {
   return search->searchParams;
 }
 
@@ -59,44 +101,98 @@ void AsyncBot::setPosition(Player pla, const Board& board, const BoardHistory& h
   stopAndWait();
   search->setPosition(pla,board,history);
 }
-void AsyncBot::setRulesAndClearHistory(Rules rules, int encorePhase) {
+void AsyncBot::setPlayerAndClearHistory(Player pla) {
   stopAndWait();
-  search->setRulesAndClearHistory(rules,encorePhase);
+  search->setPlayerAndClearHistory(pla);
+}
+void AsyncBot::setPlayerIfNew(Player pla) {
+  stopAndWait();
+  search->setPlayerIfNew(pla);
 }
 void AsyncBot::setKomiIfNew(float newKomi) {
   stopAndWait();
   search->setKomiIfNew(newKomi);
 }
-void AsyncBot::setRootPassLegal(bool b) {
+void AsyncBot::setAvoidMoveUntilByLoc(const std::vector<int>& bVec, const std::vector<int>& wVec) {
   stopAndWait();
-  search->setRootPassLegal(b);
+  search->setAvoidMoveUntilByLoc(bVec,wVec);
 }
-void AsyncBot::setParams(SearchParams params) {
+void AsyncBot::setAvoidMoveUntilRescaleRoot(bool b) {
+  stopAndWait();
+  search->setAvoidMoveUntilRescaleRoot(b);
+}
+void AsyncBot::setRootFocus(const std::vector<Loc>& moves, const std::vector<double>& weights, double prob) {
+  search->setRootFocus(moves,weights,prob);
+}
+void AsyncBot::setRootHintLoc(Loc loc) {
+  stopAndWait();
+  search->setRootHintLoc(loc);
+}
+void AsyncBot::setAlwaysIncludeOwnerMap(bool b) {
+  stopAndWait();
+  search->setAlwaysIncludeOwnerMap(b);
+}
+void AsyncBot::setParams(const SearchParams& params) {
   stopAndWait();
   search->setParams(params);
+}
+void AsyncBot::setParamsNoClearing(const SearchParams& params) {
+  stopAndWait();
+  search->setParamsNoClearing(params);
+}
+void AsyncBot::setExternalPatternBonusTable(std::unique_ptr<PatternBonusTable>&& table) {
+  stopAndWait();
+  search->setExternalPatternBonusTable(std::move(table));
+}
+void AsyncBot::setCopyOfExternalPatternBonusTable(const std::unique_ptr<PatternBonusTable>& table) {
+  stopAndWait();
+  search->setCopyOfExternalPatternBonusTable(table);
+}
+void AsyncBot::setExternalEvalCache(const std::shared_ptr<EvalCacheTable>& cache) {
+  stopAndWait();
+  search->setExternalEvalCache(cache);
 }
 void AsyncBot::clearSearch() {
   stopAndWait();
   search->clearSearch();
+}
+void AsyncBot::clearEvalCache() {
+  stopAndWait();
+  if(search->evalCache != nullptr)
+    search->evalCache->clear();
 }
 
 bool AsyncBot::makeMove(Loc moveLoc, Player movePla) {
   stopAndWait();
   return search->makeMove(moveLoc,movePla);
 }
-
-bool AsyncBot::isLegal(Loc moveLoc, Player movePla) const {
-  return search->isLegal(moveLoc,movePla);
+bool AsyncBot::makeMove(Loc moveLoc, Player movePla, bool preventEncore) {
+  stopAndWait();
+  return search->makeMove(moveLoc,movePla,preventEncore);
 }
 
-void AsyncBot::genMove(Player movePla, int searchId, const TimeControls& tc, std::function<void(Loc,int)> onMove) {
-  genMove(movePla,searchId,tc,1.0,onMove);
+bool AsyncBot::isLegalTolerant(Loc moveLoc, Player movePla) const {
+  return search->isLegalTolerant(moveLoc,movePla);
+}
+bool AsyncBot::isLegalStrict(Loc moveLoc, Player movePla) const {
+  return search->isLegalStrict(moveLoc,movePla);
 }
 
-void AsyncBot::genMove(Player movePla, int searchId, const TimeControls& tc, double sf, std::function<void(Loc,int)> onMove) {
-  unique_lock<std::mutex> lock(controlMutex);
+void AsyncBot::genMoveAsync(Player movePla, int searchId, const TimeControls& tc, const std::function<void(Loc,int,Search*)>& onMove) {
+  genMoveAsync(movePla,searchId,tc,1.0,onMove,nullptr);
+}
+
+void AsyncBot::genMoveAsync(Player movePla, int searchId, const TimeControls& tc, double sf, const std::function<void(Loc,int,Search*)>& onMove) {
+  genMoveAsync(movePla,searchId,tc,sf,onMove,nullptr);
+}
+
+void AsyncBot::genMoveAsync(Player movePla, int searchId, const TimeControls& tc, double sf, const std::function<void(Loc,int,Search*)>& onMove, const std::function<void()>& onSearchBegun) {
+  std::unique_lock<std::mutex> lock(controlMutex);
   stopAndWaitAlreadyLocked(lock);
-  assert(!isRunning);
+  testAssert(!isRunning);
+  if(isKilled)
+    return;
+
   if(movePla != search->rootPla)
     search->setPlayerAndClearHistory(movePla);
 
@@ -107,28 +203,32 @@ void AsyncBot::genMove(Player movePla, int searchId, const TimeControls& tc, dou
   shouldStopNow = false;
   timeControls = tc;
   searchFactor = sf;
+  analyzeCallbackPeriod = -1;
+  analyzeFirstCallbackAfter = -1;
+  analyzeCallback = nullptr;
+  searchBegunCallback = onSearchBegun;
   lock.unlock();
   threadWaitingToSearch.notify_all();
 }
 
 Loc AsyncBot::genMoveSynchronous(Player movePla, const TimeControls& tc) {
-  return genMoveSynchronous(movePla,tc,1.0);
+  return genMoveSynchronous(movePla,tc,1.0,nullptr);
 }
 
 Loc AsyncBot::genMoveSynchronous(Player movePla, const TimeControls& tc, double sf) {
-  Loc moveLoc = Board::NULL_LOC;
-  std::function<void(Loc,int)> onMove = [&moveLoc](Loc loc, int searchId) {
-    assert(searchId == 0);
-    moveLoc = loc;
-  };
-  genMove(movePla,0,tc,sf,onMove);
-  waitForSearchToEnd();
-  return moveLoc;
+  return genMoveSynchronous(movePla,tc,sf,nullptr);
 }
 
-static void ignoreMove(Loc loc, int searchId) {
-  (void)loc;
-  (void)searchId;
+Loc AsyncBot::genMoveSynchronous(Player movePla, const TimeControls& tc, double sf, const std::function<void()>& onSearchBegun) {
+  Loc moveLoc = Board::NULL_LOC;
+  std::function<void(Loc,int,Search*)> onMove = [&moveLoc](Loc loc, int searchId, Search* s) noexcept {
+    testAssert(searchId == 0);
+    (void)s;
+    moveLoc = loc;
+  };
+  genMoveAsync(movePla,0,tc,sf,onMove,onSearchBegun);
+  waitForSearchToEnd();
+  return moveLoc;
 }
 
 void AsyncBot::ponder() {
@@ -136,18 +236,144 @@ void AsyncBot::ponder() {
 }
 
 void AsyncBot::ponder(double sf) {
-  unique_lock<std::mutex> lock(controlMutex);
+  std::unique_lock<std::mutex> lock(controlMutex);
   if(isRunning)
+    return;
+  if(isKilled)
     return;
 
   queuedSearchId = 0;
-  queuedOnMove = std::function<void(Loc,int)>(ignoreMove);
+  queuedOnMove = nullptr;
   isRunning = true;
-  isPondering = true;
+  isPondering = true; //True - we are searching on the opponent's turn "for" the opponent's opponent
   shouldStopNow = false;
-  timeControls = TimeControls();
+  timeControls = TimeControls(); //Blank time controls since opponent's clock is running, not ours, so no cap other than searchFactor
   searchFactor = sf;
+  analyzeCallbackPeriod = -1;
+  analyzeFirstCallbackAfter = -1;
+  analyzeCallback = nullptr;
+  searchBegunCallback = nullptr;
   lock.unlock();
+  threadWaitingToSearch.notify_all();
+}
+void AsyncBot::analyzeAsync(
+  Player movePla,
+  double sf,
+  double callbackPeriod,
+  double firstCallbackAfter,
+  const std::function<void(const Search* search)>& callback
+) {
+  std::unique_lock<std::mutex> lock(controlMutex);
+  stopAndWaitAlreadyLocked(lock);
+  testAssert(!isRunning);
+  if(isKilled)
+    return;
+
+  if(movePla != search->rootPla)
+    search->setPlayerAndClearHistory(movePla);
+
+  queuedSearchId = 0;
+  queuedOnMove = nullptr;
+  isRunning = true;
+  isPondering = false; //This should indeed be false because we are searching for the current player, not the last player we did a regular search for.
+  shouldStopNow = false;
+  timeControls = TimeControls(); //Blank time controls since no clock is not running, we don't cap search time other than through searchFactor.
+  searchFactor = sf;
+  analyzeCallbackPeriod = callbackPeriod;
+  analyzeFirstCallbackAfter = firstCallbackAfter;
+  analyzeCallback = callback;
+  searchBegunCallback = nullptr;
+  lock.unlock();
+  threadWaitingToSearch.notify_all();
+}
+
+void AsyncBot::genMoveAsyncAnalyze(
+  Player movePla,
+  int searchId,
+  const TimeControls& tc,
+  double sf,
+  const std::function<void(Loc,int,Search*)>& onMove,
+  double callbackPeriod,
+  double firstCallbackAfter,
+  const std::function<void(const Search* search)>& callback
+) {
+  genMoveAsyncAnalyze(movePla, searchId, tc, sf, onMove, callbackPeriod, firstCallbackAfter, callback, nullptr);
+}
+
+void AsyncBot::genMoveAsyncAnalyze(
+  Player movePla,
+  int searchId,
+  const TimeControls& tc,
+  double sf,
+  const std::function<void(Loc,int,Search*)>& onMove,
+  double callbackPeriod,
+  double firstCallbackAfter,
+  const std::function<void(const Search* search)>& callback,
+  const std::function<void()>& onSearchBegun
+) {
+  std::unique_lock<std::mutex> lock(controlMutex);
+  stopAndWaitAlreadyLocked(lock);
+  testAssert(!isRunning);
+  if(isKilled)
+    return;
+
+  if(movePla != search->rootPla)
+    search->setPlayerAndClearHistory(movePla);
+
+  queuedSearchId = searchId;
+  queuedOnMove = onMove;
+  isRunning = true;
+  isPondering = false;
+  shouldStopNow = false;
+  timeControls = tc;
+  searchFactor = sf;
+  analyzeCallbackPeriod = callbackPeriod;
+  analyzeFirstCallbackAfter = firstCallbackAfter;
+  analyzeCallback = callback;
+  searchBegunCallback = onSearchBegun;
+  lock.unlock();
+  threadWaitingToSearch.notify_all();
+}
+
+Loc AsyncBot::genMoveSynchronousAnalyze(
+  Player movePla,
+  const TimeControls& tc,
+  double sf,
+  double callbackPeriod,
+  double firstCallbackAfter,
+  const std::function<void(const Search* search)>& callback
+) {
+  return genMoveSynchronousAnalyze(movePla, tc, sf, callbackPeriod, firstCallbackAfter, callback, nullptr);
+}
+
+Loc AsyncBot::genMoveSynchronousAnalyze(
+  Player movePla,
+  const TimeControls& tc,
+  double sf,
+  double callbackPeriod,
+  double firstCallbackAfter,
+  const std::function<void(const Search* search)>& callback,
+  const std::function<void()>& onSearchBegun
+) {
+  Loc moveLoc = Board::NULL_LOC;
+  std::function<void(Loc,int,Search*)> onMove = [&moveLoc](Loc loc, int searchId, Search* s) noexcept {
+    testAssert(searchId == 0);
+    (void)s;
+    moveLoc = loc;
+  };
+  genMoveAsyncAnalyze(movePla,0,tc,sf,onMove,callbackPeriod,firstCallbackAfter,callback,onSearchBegun);
+  waitForSearchToEnd();
+  return moveLoc;
+}
+
+void AsyncBot::stopWithoutWait() {
+  shouldStopNow.store(true);
+}
+
+void AsyncBot::setKilled() {
+  lock_guard<std::mutex> lock(controlMutex);
+  isKilled = true;
+  shouldStopNow.store(true);
   threadWaitingToSearch.notify_all();
 }
 
@@ -156,45 +382,138 @@ void AsyncBot::stopAndWait() {
   waitForSearchToEnd();
 }
 
-void AsyncBot::stopAndWaitAlreadyLocked(unique_lock<std::mutex>& lock) {
+void AsyncBot::stopAndWaitAlreadyLocked(std::unique_lock<std::mutex>& lock) {
   shouldStopNow.store(true);
   waitForSearchToEndAlreadyLocked(lock);
 }
 
 void AsyncBot::waitForSearchToEnd() {
-  unique_lock<std::mutex> lock(controlMutex);
+  std::unique_lock<std::mutex> lock(controlMutex);
   while(isRunning)
     userWaitingForStop.wait(lock);
 }
 
-void AsyncBot::waitForSearchToEndAlreadyLocked(unique_lock<std::mutex>& lock) {
+void AsyncBot::waitForSearchToEndAlreadyLocked(std::unique_lock<std::mutex>& lock) {
   while(isRunning)
     userWaitingForStop.wait(lock);
 }
 
 void AsyncBot::internalSearchThreadLoop() {
-  unique_lock<std::mutex> lock(controlMutex);
+  std::unique_lock<std::mutex> lock(controlMutex);
   while(true) {
     while(!isRunning && !isKilled)
       threadWaitingToSearch.wait(lock);
-    if(isKilled)
+    if(isKilled) {
+      isRunning = false;
+      isPondering = false;
+      userWaitingForStop.notify_all();
       break;
+    }
 
-    bool pondering = isPondering;
-    TimeControls tc = timeControls;
+    const bool pondering = isPondering;
+    const TimeControls tc = timeControls;
+    double callbackPeriod = analyzeCallbackPeriod;
+    double firstCallbackAfter = analyzeFirstCallbackAfter;
+    //Make local copies just in case, to simplify thread reasoning for the member fields
+    std::function<void(const Search*)> analyzeCallbackLocal = analyzeCallback;
+    std::function<void()> searchBegunCallbackLocal = searchBegunCallback;
     lock.unlock();
 
-    search->runWholeSearch(*logger,shouldStopNow,NULL,pondering,tc,searchFactor);
+    //Make sure we don't feed in absurdly large numbers, this seems to cause wait_for to hang.
+    //For a long period, just don't do callbacks.
+    if(callbackPeriod >= 10000000)
+      callbackPeriod = -1;
+    if(firstCallbackAfter >= 10000000) {
+      firstCallbackAfter = -1;
+      callbackPeriod = -1;
+    }
+
+    //Handle search begun and analysis callback loops
+    const bool usingCallbackLoop = (firstCallbackAfter >= 0 || callbackPeriod >= 0) && analyzeCallbackLocal;
+
+    bool isSearchBegun = false;
+    condition_variable callbackLoopWaitingForSearchBegun;
+    std::function<void()> searchBegun = [this,usingCallbackLoop,&isSearchBegun,&searchBegunCallbackLocal,&callbackLoopWaitingForSearchBegun]() {
+      if(searchBegunCallbackLocal)
+        searchBegunCallbackLocal();
+      if(usingCallbackLoop) {
+        std::lock_guard<std::mutex> callbackLock(controlMutex);
+        isSearchBegun = true;
+        callbackLoopWaitingForSearchBegun.notify_all();
+      }
+    };
+
+    condition_variable callbackLoopWaiting;
+    atomic<bool> callbackLoopShouldStop(false);
+    auto callbackLoop = [this,&isSearchBegun,&callbackLoopWaitingForSearchBegun,callbackPeriod,firstCallbackAfter,&analyzeCallbackLocal,&callbackLoopWaiting,&callbackLoopShouldStop]() {
+      std::unique_lock<std::mutex> callbackLock(controlMutex);
+      while(!isSearchBegun) {
+        callbackLoopWaitingForSearchBegun.wait(callbackLock);
+        if(callbackLoopShouldStop.load())
+          return;
+      }
+
+      double periodToWait = firstCallbackAfter;
+      bool gotReportYet = false;
+      while(true) {
+        if(periodToWait < 0)
+          return;
+
+        callbackLoopWaiting.wait_for(
+          callbackLock,
+          std::chrono::duration<double>(periodToWait),
+          [&callbackLoopShouldStop](){return callbackLoopShouldStop.load();}
+        );
+        if(callbackLoopShouldStop.load())
+          return;
+
+        // If the search hasn't yet produced any reportable root values because firstCallbackAfter
+        // elapsed before the root NN eval finished, skip callback and re-wait.
+        // Use a mild exponential backoff to avoid overly eager busy looping for tiny waits, just in case.
+        if(!gotReportYet) {
+          ReportedSearchValues unusedVals;
+          if(!search->getRootValues(unusedVals)) {
+            periodToWait = periodToWait * 1.25 + 0.001;
+            double cap = std::max(firstCallbackAfter, (callbackPeriod < 0 ? 1.0 : callbackPeriod));
+            periodToWait = std::min(periodToWait,cap);
+            continue;
+          }
+          gotReportYet = true;
+          periodToWait = callbackPeriod;
+        }
+        callbackLock.unlock();
+        analyzeCallbackLocal(search);
+        callbackLock.lock();
+      }
+    };
+
+    std::thread callbackLoopThread;
+    if(usingCallbackLoop) {
+      callbackLoopThread = std::thread(callbackLoop);
+    }
+
+    std::function<bool()> shouldStopEarly = [this]() noexcept {
+      return shouldStopNow.load(std::memory_order_acquire);
+    };
+
+    search->runWholeSearch(&searchBegun,&shouldStopEarly,pondering,tc,searchFactor);
     Loc moveLoc = search->getChosenMoveLoc();
 
+    if(usingCallbackLoop) {
+      lock.lock();
+      callbackLoopShouldStop.store(true);
+      callbackLoopWaitingForSearchBegun.notify_all();
+      callbackLoopWaiting.notify_all();
+      lock.unlock();
+      callbackLoopThread.join();
+    }
+
     lock.lock();
-    //Must call queuedOnMove under the lock since during the pondering->normal search
-    //transition it might change out from underneath us
-    queuedOnMove(moveLoc,queuedSearchId);
+    //Call queuedOnMove under the lock just in case
+    if(queuedOnMove)
+      queuedOnMove(moveLoc,queuedSearchId,search);
     isRunning = false;
     isPondering = false;
     userWaitingForStop.notify_all();
   }
 }
-
-

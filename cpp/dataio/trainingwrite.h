@@ -1,50 +1,93 @@
-#ifndef TRAINING_WRITE_H
-#define TRAINING_WRITE_H
+#ifndef DATAIO_TRAINING_WRITE_H_
+#define DATAIO_TRAINING_WRITE_H_
 
-#include "../neuralnet/nninputs.h"
-#include "../neuralnet/nninterface.h"
+#include <atomic>
+
 #include "../dataio/numpywrite.h"
+#include "../neuralnet/nninputs.h"
+#include "../neuralnet/sgfmetadata.h"
+#include "../neuralnet/nninterface.h"
 
 STRUCT_NAMED_PAIR(Loc,loc,int16_t,policyTarget,PolicyTargetMove);
-STRUCT_NAMED_PAIR(vector<PolicyTargetMove>*,policyTargets,int64_t,unreducedNumVisits,PolicyTarget);
+STRUCT_NAMED_PAIR(std::vector<PolicyTargetMove>*,policyTargets,int64_t,unreducedNumVisits,PolicyTarget);
 
+STRUCT_NAMED_QUAD(Loc,loc,float,winLoss,float,score,int64_t,visits,QValueTargetMove);
+
+struct QValueTargets {
+  std::vector<QValueTargetMove> targets;
+  QValueTargets() = default;
+  ~QValueTargets() = default;
+};
+
+//Summary of value-head-related training targets for outputted data.
 struct ValueTargets {
   //As usual, these are from the perspective of white.
   float win;
   float loss;
   float noResult;
   float score;
+  bool hasLead;
+  float lead;
 
-  bool hasMctsUtility;
-  float mctsUtility1;
-  float mctsUtility4;
-  float mctsUtility16;
-  float mctsUtility64;
-  float mctsUtility256;
   ValueTargets();
   ~ValueTargets();
 };
 
+//Some basic extra stats to record outputted data about the neural net's raw evaluation on the position.
+struct NNRawStats {
+  double whiteWinLoss;
+  double whiteScoreMean;
+  double policyEntropy;
+};
+
+//Info about the post-game reanalysis (full re-search) of a position that originally got only a cheap search.
+struct ReanalysisData {
+  bool wasReanalyzed = false;
+  //If false, the targets derived from the final board and the actual game continuation (ownership, final
+  //score, future board positions, and the next-move policy target) are not recorded for this row. The value
+  //targets always come from the game's value target array, whose entry at this turn is the reanalysis
+  //search's values but whose later entries and final outcome still reflect the actual game.
+  bool usedOutcomeTargets = true;
+  //The policy surprise and value surprise of the original cheap search on this turn, which are the stats
+  //that drove the probability of this position being selected for reanalysis. The value surprise is computed
+  //by whichever definition was configured (see PlaySettings::useSearchValueSurprise).
+  float selectionPolicySurprise = 0.0f;
+  float selectionValueSurprise = 0.0f;
+  //The number of visits of the original cheap search, whose recorded targets were replaced.
+  int64_t originalNumVisits = 0;
+  //Number of neural net changes this game before this reanalysis search was performed.
+  int numNeuralNetChangesSoFar = 0;
+};
+
+//A side position that was searched off the main line of the game, to give some data about an alternative move.
 struct SidePosition {
   Board board;
   BoardHistory hist;
   Player pla;
   int64_t unreducedNumVisits;
-  vector<PolicyTargetMove> policyTarget;
+  std::vector<PolicyTargetMove> policyTarget;
+  double policySurprise;
+  double policyEntropy;
+  double searchEntropy;
   ValueTargets whiteValueTargets;
+  QValueTargets whiteQValueTargets;
+  NNRawStats nnRawStats;
   float targetWeight;
+  float targetWeightUnrounded;
   int numNeuralNetChangesSoFar; //Number of neural net changes this game before the creation of this side position
+  Player playoutDoublingAdvantagePla;
+  double playoutDoublingAdvantage;
 
   SidePosition();
   SidePosition(const Board& board, const BoardHistory& hist, Player pla, int numNeuralNetChangesSoFar);
   ~SidePosition();
 };
 
-STRUCT_NAMED_PAIR(string,name,int,turnNumber,ChangedNeuralNet);
+STRUCT_NAMED_PAIR(std::string,name,int,turnIdx,ChangedNeuralNet);
 
 struct FinishedGameData {
-  string bName;
-  string wName;
+  std::string bName;
+  std::string wName;
   int bIdx;
   int wIdx;
 
@@ -55,29 +98,69 @@ struct FinishedGameData {
   Hash128 gameHash;
 
   double drawEquivalentWinsForWhite;
+  Player playoutDoublingAdvantagePla;
+  double playoutDoublingAdvantage;
   bool hitTurnLimit;
 
   //Metadata about how the game was initialized
   int numExtraBlack;
   int mode;
-  int modeMeta1;
-  int modeMeta2;
+  int beganInEncorePhase;
+  int usedInitialPosition;
+  //This differs from numExtraBlack in that numExtraBlack counts number of extra black stones
+  //played following the start of startHist, whereas handicapForSgf counts from startBoard.
+  //So on things like forked handicap games this one will be larger. Also this one does the
+  //whole +1 thing, skipping 1H.
+  int handicapForSgf;
 
   //If false, then we don't have these below vectors and ownership information
   bool hasFullData;
-  int posLen;
-  vector<float> targetWeightByTurn;
-  vector<PolicyTarget> policyTargetsByTurn;
-  vector<ValueTargets> whiteValueTargetsByTurn;
-  int8_t* finalWhiteOwnership;
+  std::vector<float> targetWeightByTurn;
+  std::vector<float> targetWeightByTurnUnrounded;
+  std::vector<PolicyTarget> policyTargetsByTurn;
+  std::vector<double> policySurpriseByTurn;
+  std::vector<double> policyEntropyByTurn;
+  std::vector<double> searchEntropyByTurn;
+  std::vector<ValueTargets> whiteValueTargetsByTurn; //Except this one, we may have some of
+  std::vector<QValueTargets> whiteQValueTargetsByTurn;
+  std::vector<NNRawStats> nnRawStatsByTurn;
+  std::vector<ReanalysisData> reanalysisByTurn; //May be empty if no reanalysis was configured
+  //Statistical info, not used for training targets. The value surprise of each turn as used for surprise-based
+  //data weighting (if reanalysis happened, recomputed afterward, so reanalyzed turns reflect the reanalysis
+  //search rather than the value surprise that drove their selection), and whether each turn's search during
+  //the game was a cheap search.
+  std::vector<double> valueSurpriseByTurn;
+  std::vector<bool> wasCheapSearchByTurn;
 
-  vector<SidePosition*> sidePositions;
-  vector<ChangedNeuralNet*> changedNeuralNets;
+  Color* finalFullArea;
+  Color* finalOwnership;
+  bool* finalSekiAreas;
+  float* finalWhiteScoring;
+
+  double trainingWeight;
+
+  std::vector<SidePosition*> sidePositions;
+  std::vector<ChangedNeuralNet*> changedNeuralNets;
+
+  double bTimeUsed;
+  double wTimeUsed;
+  int bMoveCount;
+  int wMoveCount;
+
+  static constexpr int NUM_MODES = 8;
+  static constexpr int MODE_NORMAL = 0;
+  static constexpr int MODE_CLEANUP_TRAINING = 1;
+  static constexpr int MODE_FORK = 2;
+  static constexpr int MODE_HANDICAP = 3;
+  static constexpr int MODE_SGFPOS = 4;
+  static constexpr int MODE_HINTPOS = 5;
+  static constexpr int MODE_HINTFORK = 6;
+  static constexpr int MODE_ASYM = 7;
 
   FinishedGameData();
   ~FinishedGameData();
 
-  void printDebug(ostream& out) const;
+  void printDebug(std::ostream& out) const;
 };
 
 struct TrainingWriteBuffers {
@@ -85,8 +168,11 @@ struct TrainingWriteBuffers {
   int maxRows;
   int numBinaryChannels;
   int numGlobalChannels;
-  int posLen;
+  int dataXLen;
+  int dataYLen;
   int packedBoardArea;
+
+  bool hasMetadataInput;
 
   int curRows;
   float* binaryInputNCHWUnpacked;
@@ -108,68 +194,109 @@ struct TrainingWriteBuffers {
 
   //Value targets and other metadata, from the perspective of the player to move
   //C0-3: Categorial game result, win,loss,noresult, and also score. Draw is encoded as some blend of win and loss based on drawEquivalentWinsForWhite.
-  //C4-7: MCTS win-loss-noresult estimate td-like target, lambda = 35/36, nowFactor = 1/36
-  //C8-11: MCTS win-loss-noresult estimate td-like target, lambda = 11/12, nowFactor = 1/12
-  //C12-15: MCTS win-loss-noresult estimate td-like target, lambda = 3/4, nowFactor = 1/4
-  //C16-19: MCTS win-loss-noresult estimate td-like target, lambda = 0, nowFactor = 1 (no-temporal-averaging MCTS search result)
+  //C4-7: MCTS win-loss-noresult estimate td-like target, lambda = 1 - 1/(1 + boardArea * 0.176)
+  //C8-11: MCTS win-loss-noresult estimate td-like target, lambda = 1 - 1/(1 + boardArea * 0.056)
+  //C12-15: MCTS win-loss-noresult estimate td-like target, lambda = 1 - 1/(1 + boardArea * 0.016)
+  //C16-19: MCTS win-loss-noresult estimate td-like target, lambda = 0 (so, actually just the immediate MCTS result).
 
   //C20: Actual final score, from the perspective of the player to move, adjusted for draw utility, zero if C27 is zero.
-  //C21: MCTS utility variance, 1->4 visits
-  //C22: MCTS utility variance, 4->16 visits
-  //C23: MCTS utility variance, 16->64 visits
-  //C24: MCTS utility variance, 64->256 visits
+  //C21: Lead in points, number of points to make the game fair, zero if C29 is zero.
+  //C22: Expected arrival time of WL variance.
+  //C23: Unused
+  //C24: 1.0 minus weight assigned to td value targets
 
   //C25 Weight multiplier for row as a whole
 
-  //C26 Weight assigned to the policy target
-  //C27 Weight assigned to the final board ownership target and score distr and bonus score targets. Most training rows will have this be 1, some will be 0.
-  //C28: Weight assigned to the utilityvariance target
-  //C29: Weight assigned to the next move policy target
-  //C30: Unused
+  //C26: Weight assigned to the policy target
+  //C27: Weight assigned to the final board ownership target and score distr targets. Most training rows will have this be 1, some will be 0.
+  //C28: Weight assigned to the next move policy target
+  //C29: Weight assigned to the lead target
+  //C30: Policy Surprise (for statistical purposes)
+  //C31: Policy Entropy (for statistical purposes)
+  //C32: Search Entropy (for statistical purposes)
+  //C33: Weight assigned to the future position targets valueTargetsNCHW C1-C2
+  //C34: Weight assigned to the area/territory target valueTargetsNCHW C4
+  //C35: 1.0 minus weight assigned to value targets
 
-  //C31-35: Precomputed mask values indicating if we should use historical moves 1-5, if we desire random history masking.
+  //C36-40: Precomputed mask values indicating if we should use historical moves 1-5, if we desire random history masking.
   //1 means use, 0 means don't use.
 
-  //C36-41: 128-bit hash identifying the game which should also be output in the SGF data.
+  //C41-46: 128-bit hash identifying the game, different rows from the same game share the same value.
   //Split into chunks of 22, 22, 20, 22, 22, 20 bits, little-endian style (since floats have > 22 bits of precision).
 
-  //C42: Komi, adjusted for draw utility and points costed or paid so far, from the perspective of the player to move.
-  //C43: 1 if we're in an area-scoring-like phase of the game (area scoring or second encore territory scoring)
+  //C47: Komi, adjusted for draw utility and points costed or paid so far, from the perspective of the player to move.
+  //C48: 1 if we're in an area-scoring-like phase of the game (area scoring or second encore territory scoring)
 
-  //C44: 1 if an earlier neural net started this game, compared to the latest in this data file.
-  //C45: If positive, an earlier neural net was playing this specific move, compared to the latest in this data file.
+  //C49: 1 if an earlier neural net started this game, compared to the latest in this data file.
+  //C50: If positive, an earlier neural net was playing this specific move, compared to the latest in this data file.
 
-  //C46: Turn number of the game, zero-indexed.
-  //C47: Did this game end via hitting turn limit?
-  //C48: First turn of this game that was selfplay for training rather than initialization (e.g. handicap stones, random init of the starting board pos)
-  //C49: Number of extra moves black got at the start (i.e. handicap games)
+  //C51: Turn idx of the game right now, zero-indexed. Starts at 0 even for sgfposes.
+  //C52: Did this game end via hitting turn limit?
+  //C53: First turn of this game that was selfplay for training rather than initialization (e.g. handicap stones, random init of the starting board pos)
+  //C54: Number of extra moves black got at the start (i.e. handicap games)
 
-  //C50-51: Game type, game typesource metadata
-  // 0 = normal self-play game. C51 unused
-  // 1 = encore-training game. C51 is the starting encore phase
-  //C52: 0 = normal, 1 = whole game was forked with an experimental move in the opening
-  //C53: 0 = normal, 1 = training sample was an isolated side position forked off of main game
-  //C54: Unused
-  //C55: Number of visits in the search generating this row, prior to any reduction.
+  //C55: Game type, how the game was initialized
+  //0 = normal self-play game.
+  //1 = cleanup-phase-training game.
+  //2 = fork from another self-play game.
+  //3 = handicap game
+  //4 = sampled from an external SGF position (e.g. human data or other bots).
+  //5 = sampled from a hint position (e.g. blindspot training).
+  //6 = forked from a hint position (e.g. blindspot training).
+  //7 = asymmetric playouts game (nonzero "PDA"). Note that this might actually get overwritten by modes 2,4,5,6.
+
+  //C56: Initial turn number - the turn number that corresponds to turn idx 0, such as for sgfposes.
+  //C57: Raw winloss from neural net
+  //C58: Raw scoremean from neural net
+  //C59: Policy prior entropy
+  //C60: Number of visits in the search generating this row, prior to any reduction.
+  //C61: Number of bonus points the player to move will get onward from this point in the game. Reliable only if C27 and/or C62 (V2 and later), otherwise may make no sense.
+  //C62: V1: unused. V2 and later: 1 if the game was finished and not a side position.
+  //C63: Data format version, currently always equals 3. Version 2 data had only 64 channels, ending here.
+
+  //C64: 1 if this position originally got only a cheap search during the game and was reanalyzed with a full search
+  //after the game ended, generating this row. 0 for ordinary full-search rows and side position rows.
+  //C65: If C64, the policy surprise of the original cheap search (the reanalysis search's own policy surprise is in C30).
+  //C66: If C64, the value surprise of the original cheap search, by whichever value surprise definition was
+  //configured (see PlaySettings::useSearchValueSurprise). Both C65 and C66 are the stats that drove the
+  //probability of this position being selected for reanalysis, recorded for statistical purposes.
+  //C67: If C64, the number of visits of the original cheap search (the reanalysis search's visits are in C60).
+  //C68-79: Unused, zero-filled.
 
   NumpyBuffer<float> globalTargetsNC;
 
   //Score target
-  //Indices correspond to scores, from (-posLen^2-EXTRA_SCORE_DISTR_RADIUS)-0.5 to (posLen^2+EXTRA_SCORE_DISTR_RADIUS)+0.5,
-  //making 2*posLen^2+2*EXTRA_SCORE_DISTR_RADIUS indices in total.
+  //Indices correspond to scores, from (-dataXLen*dataYLen-EXTRA_SCORE_DISTR_RADIUS)-0.5 to (dataXLen*dataYLen+EXTRA_SCORE_DISTR_RADIUS)+0.5,
+  //making 2*dataXLen*dataYLen+2*EXTRA_SCORE_DISTR_RADIUS indices in total.
   //Index of the actual score is labeled with 100, the rest labeled with 0, from the perspective of the player to move.
   //Except in case of integer komi, the value can be split between two adjacent labels based on value of draw.
-  //Arbitrary if C26 has weight 0.
+  //Arbitrary if C27 has weight 0.
   NumpyBuffer<int8_t> scoreDistrN;
-  //Ranges from -30 to 30, 61 indices in total. Index of the number of bonus points the player to move will get onward from this point in the game
-  //is labeled with 1, the rest labeled with 0, from the perspective of the player to move.
-  NumpyBuffer<int8_t> selfBonusScoreN;
 
   //Spatial value-related targets
-  //C0 - Final board ownership (-1,0,1), from the perspective of the player to move. All 0 if C26 has weight 0.
+  //C0: Final board ownership [-1,1], from the perspective of the player to move. All 0 if C27 has weight 0.
+  //C1: Difference between ownership and naive area (such as due to seki). All 0 if C27 has weight 0.
+  //C2-3: Future board position a certain number of turns in the future. All 0 if C33 has weight 0.
+  //C4: Final board area/territory [-120,120]. All 0 if C34 has weight 0. Unlike ownership, takes into account group tax and scoring rules.
   NumpyBuffer<int8_t> valueTargetsNCHW;
 
-  TrainingWriteBuffers(int inputsVersion, int maxRows, int numBinaryChannels, int numGlobalChannels, int posLen);
+  //Spatial q-value targets, from the perspective of the player to move.
+  //C0: winloss * 32000
+  //C1: score * 60
+  //C2: visits
+  NumpyBuffer<int16_t> qValueTargetsNCMove;
+
+  NumpyBuffer<float> metadataInputNC;
+
+  TrainingWriteBuffers(
+    int inputsVersion,
+    int maxRows,
+    int numBinaryChannels,
+    int numGlobalChannels,
+    int dataXLen,
+    int dataYLen,
+    bool hasMetadataInput
+  );
   ~TrainingWriteBuffers();
 
   TrainingWriteBuffers(const TrainingWriteBuffers&) = delete;
@@ -179,44 +306,76 @@ struct TrainingWriteBuffers {
 
   void addRow(
     const Board& board, const BoardHistory& hist, Player nextPlayer,
-    int turnNumberAfterStart,
+    const BoardHistory& startHist,
+    const BoardHistory& actualGameEndHist,
+    int turnAfterStart,
     float targetWeight,
     int64_t unreducedNumVisits,
-    const vector<PolicyTargetMove>* policyTarget0, //can be null
-    const vector<PolicyTargetMove>* policyTarget1, //can be null
-    const vector<ValueTargets>& whiteValueTargets,
+    const std::vector<PolicyTargetMove>* policyTarget0, //can be null
+    const std::vector<PolicyTargetMove>* policyTarget1, //can be null
+    double policySurprise,
+    double policyEntropy,
+    double searchEntropy,
+    const std::vector<ValueTargets>& whiteValueTargets,
+    const std::vector<QValueTargets>& whiteQValueTargets,
     int whiteValueTargetsIdx, //index in whiteValueTargets corresponding to this turn.
-    int8_t* finalWhiteOwnership,
+    float valueTargetWeight,
+    float tdValueTargetWeight,
+    float leadTargetWeightFactor,
+    const NNRawStats& nnRawStats,
+    const Board* finalBoard,
+    Color* finalFullArea,
+    Color* finalOwnership,
+    float* finalWhiteScoring,
+    const std::vector<Board>* posHistForFutureBoards, //can be null
     bool isSidePosition,
     int numNeuralNetsBehindLatest,
-    const FinishedGameData& data,
-    Rand& rand
+    double drawEquivalentWinsForWhite,
+    Player playoutDoublingAdvantagePla,
+    double playoutDoublingAdvantage,
+    Hash128 gameHash,
+    const std::vector<ChangedNeuralNet*>& changedNeuralNets,
+    bool hitTurnLimit,
+    int numExtraBlack,
+    int mode,
+    SGFMetadata* sgfMeta,
+    Rand& rand,
+    const ReanalysisData& reanalysisData = ReanalysisData()
   );
 
-  void writeToZipFile(const string& fileName);
-  void writeToTextOstream(ostream& out);
+  void writeToZipFile(const std::string& fileName);
+  void writeToTextOstream(std::ostream& out);
 
 };
 
 class TrainingDataWriter {
  public:
-  TrainingDataWriter(const string& outputDir, int inputsVersion, int maxRowsPerFile, double firstFileMinRandProp, int posLen, const string& randSeed);
-  TrainingDataWriter(ostream* debugOut, int inputsVersion, int maxRowsPerFile, double firstFileMinRandProp, int posLen, int onlyWriteEvery, const string& randSeed);
-  TrainingDataWriter(const string& outputDir, ostream* debugOut, int inputsVersion, int maxRowsPerFile, double firstFileMinRandProp, int posLen, int onlyWriteEvery, const string& randSeed);
+  TrainingDataWriter(const std::string& outputDir, int inputsVersion, int maxRowsPerFile, double firstFileMinRandProp, int dataXLen, int dataYLen, const std::string& randSeed);
+  TrainingDataWriter(std::ostream* debugOut, int inputsVersion, int maxRowsPerFile, double firstFileMinRandProp, int dataXLen, int dataYLen, int onlyWriteEvery, const std::string& randSeed);
+  TrainingDataWriter(const std::string& outputDir, std::ostream* debugOut, int inputsVersion, int maxRowsPerFile, double firstFileMinRandProp, int dataXLen, int dataYLen, int onlyWriteEvery, const std::string& randSeed);
   ~TrainingDataWriter();
 
   void writeGame(const FinishedGameData& data);
   void flushIfNonempty();
+  bool flushIfNonempty(std::string& resultingFilename);
+
+  bool isEmpty() const;
+  int64_t numRowsInBuffer() const;
+  // Cumulative training rows added by this writer, including rows still in the buffer not yet flushed to file.
+  // Safe to call concurrently from other threads (e.g. for stats logging).
+  int64_t numRowsWritten() const;
 
  private:
-  string outputDir;
+  std::string outputDir;
   int inputsVersion;
   Rand rand;
   TrainingWriteBuffers* writeBuffers;
 
-  ostream* debugOut;
+  std::ostream* debugOut;
   int debugOnlyWriteEvery;
-  int64_t rowCount;
+  // Atomic only so that numRowsWritten() can be read for stats from other threads;
+  // all mutation happens on the single thread using this writer.
+  std::atomic<int64_t> rowCount;
 
   bool isFirstFile;
   int firstFileMaxRows;
@@ -226,4 +385,4 @@ class TrainingDataWriter {
 };
 
 
-#endif
+#endif  // DATAIO_TRAININGWRITE_H_

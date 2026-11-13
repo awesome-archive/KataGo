@@ -1,11 +1,12 @@
-#ifndef LOCKPOOL_H
-#define LOCKPOOL_H
+#ifndef SEARCH_MUTEXPOOL_H_
+#define SEARCH_MUTEXPOOL_H_
 
 #include "../core/global.h"
+#include "../core/hash.h"
 #include "../core/multithread.h"
 
 class MutexPool {
-  mutex* mutexes;
+  std::mutex* mutexes;
   uint32_t numMutexes;
 
  public:
@@ -13,7 +14,12 @@ class MutexPool {
   ~MutexPool();
 
   uint32_t getNumMutexes() const;
-  mutex& getMutex(uint32_t idx);
+  std::mutex& getMutex(uint32_t idx);
+
+  // Convenience methods that will automatically mod by numMutexes.
+  std::mutex& getMutexWithModulo(uint32_t idx);
+  std::mutex& getMutexWithModulo(uint64_t idx);
+  std::mutex& getMutexWithModulo(Hash128 hash);
 };
 
-#endif
+#endif  // SEARCH_MUTEXPOOL_H_
